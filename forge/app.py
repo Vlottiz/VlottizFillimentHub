@@ -485,9 +485,48 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         return profile_detail(pid)
 
     @app.delete("/api/calibrations/{cid}")
-    def delete_calibration(cid: int):
+    def delete_calibration(cid: int, undo: bool = False):
+        """Remove a calibration log entry, optionally undoing what it changed.
+
+        Undo restores only the settings that calibration changed, and only
+        where you haven't changed them again since.
+        """
+        c = db.one("SELECT * FROM calibrations WHERE id = ?", (cid,))
+        if not c:
+            raise HTTPException(404, "Calibration entry not found")
+        reverted, kept = [], []
+        if undo and c["applied"]:
+            pid = c["profile_id"]
+            # The version saved by this calibration, and the one just before it.
+            after = db.one("""SELECT * FROM profile_versions WHERE profile_id = ? AND reason LIKE 'Calibration:%'
+                              AND created <= ? ORDER BY id DESC LIMIT 1""", (pid, c["created"]))
+            before = after and db.one("SELECT * FROM profile_versions WHERE profile_id = ? AND id < ? "
+                                      "ORDER BY id DESC LIMIT 1", (pid, after["id"]))
+            if after and before:
+                p = get_profile(pid)
+                settings, sources = dict(p["settings"]), dict(p["sources"])
+                changed = {k for k in set(after["settings"]) | set(before["settings"])
+                           if after["settings"].get(k) != before["settings"].get(k)}
+                for k in sorted(changed):
+                    if settings.get(k) != after["settings"].get(k):
+                        kept.append(k)  # edited again since; leave it alone
+                        continue
+                    if k in before["settings"]:
+                        settings[k] = before["settings"][k]
+                        sources[k] = before["sources"].get(k, "baseline")
+                    else:
+                        settings.pop(k, None)
+                        sources.pop(k, None)
+                    reverted.append(k)
+                if reverted:
+                    title = calibration.TESTS.get(c["test"], {}).get("title", c["test"])
+                    db.set_profile_settings(pid, settings, sources, f"Undid calibration: {title}")
+        for ph in c["photos"] or []:
+            path = (PHOTO_DIR / ph).resolve()
+            if path.parent == PHOTO_DIR.resolve():
+                path.unlink(missing_ok=True)
         db.delete("calibrations", cid)
-        return {"ok": True}
+        return {"ok": True, "reverted": reverted, "kept": kept}
 
     @app.get("/photos/{name}")
     def photo(name: str):

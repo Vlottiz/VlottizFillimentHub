@@ -248,3 +248,45 @@ def test_every_test_has_full_guidance():
     for t in calibration.tests_for_ui():
         for key in ("orca_menu", "setup", "what_you_get", "measure", "enter", "example", "inputs"):
             assert t.get(key), (t["id"], key)
+
+
+def test_remove_calibration_entry_and_undo(client):
+    f = client.post("/api/filaments", json={"name": "PLA", "material": "PLA"}).json()
+    p = client.post("/api/profiles", json={"filament_id": f["id"]}).json()
+    pid = p["id"]
+
+    def cal(test, inputs, files=None):
+        return client.post(f"/api/profiles/{pid}/calibrations",
+                           data={"test": test, "inputs": json.dumps(inputs)}, files=files).json()
+
+    p = cal("flow_yolo", {"modifier": "-0.04"})                       # 0.98 -> 0.94
+    p = cal("pressure_advance", {"pa": "0.03"},
+            files=[("photos", ("pa.jpg", b"\xff\xd8x", "image/jpeg"))])  # PA 0.03, enabled
+    assert p["settings"]["pressure_advance"] == 0.03 and p["settings"]["enable_pressure_advance"] == 1
+    pa_entry = p["calibrations"][0]
+    photo = pa_entry["photos"][0]
+
+    # undo the PA result: PA and the enable flag go back, flow is untouched
+    r = client.delete(f"/api/calibrations/{pa_entry['id']}?undo=true").json()
+    assert sorted(r["reverted"]) == ["enable_pressure_advance", "pressure_advance"]
+    p = client.get(f"/api/profiles/{pid}").json()
+    assert p["settings"]["pressure_advance"] == 0.04 and p["sources"]["pressure_advance"] == "baseline"
+    assert p["settings"]["enable_pressure_advance"] == 0
+    assert p["settings"]["filament_flow_ratio"] == 0.94
+    assert len(p["calibrations"]) == 1
+    assert client.get(f"/photos/{photo}").status_code == 404  # photo file removed too
+
+    # edit flow by hand, then undo the flow calibration: the later edit is kept
+    client.put(f"/api/profiles/{pid}", json={"settings": {"filament_flow_ratio": 0.95}})
+    flow_entry = p["calibrations"][0]
+    r = client.delete(f"/api/calibrations/{flow_entry['id']}?undo=true").json()
+    assert r["reverted"] == [] and r["kept"] == ["filament_flow_ratio"]
+    p = client.get(f"/api/profiles/{pid}").json()
+    assert p["settings"]["filament_flow_ratio"] == 0.95 and p["calibrations"] == []
+
+    # plain remove leaves values alone
+    p = cal("retraction", {"height": "6"})
+    r = client.delete(f"/api/calibrations/{p['calibrations'][0]['id']}").json()
+    assert r["reverted"] == []
+    assert client.get(f"/api/profiles/{pid}").json()["settings"]["filament_retraction_length"] == 0.6
+    assert client.delete("/api/calibrations/9999").status_code == 404

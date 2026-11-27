@@ -48,7 +48,7 @@ function openDialog(html, onSubmit) {
     const btn = ev.submitter;
     if (!btn || btn.value === "cancel") return;
     ev.preventDefault();
-    try { if ((await onSubmit(new FormData(form), form)) !== false) dlg.close(); }
+    try { if ((await onSubmit(new FormData(form), form, btn.value)) !== false) dlg.close(); }
     catch (e) { toast(e.message, true); }
   };
   dlg.showModal();
@@ -415,11 +415,34 @@ const renderProfile = guard(async (id) => {
     toast("Restored");
     loadProfiles();
   })));
-  $$("[data-delcal]", el).forEach((b) => (b.onclick = guard(async () => {
-    if (!confirm("Remove this log entry? (The profile values stay as they are.)")) return;
-    await api(`/api/calibrations/${b.dataset.delcal}`, { method: "DELETE" });
-    renderProfile(p.id);
-  })));
+});
+
+// "remove entry" on calibration results: one handler for every page that shows them.
+document.addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-delcal]");
+  if (!b) return;
+  ev.preventDefault();
+  const applied = b.dataset.applied === "1";
+  const refresh = () => {
+    if ($("#view-calibrate").classList.contains("active")) renderCalTest();
+    else if (state.current) renderProfile(state.current);
+  };
+  openDialog(`<h2>Remove this result?</h2>
+    ${applied ? `<p>This result changed the profile. You can undo that change too, or keep the new value and just remove the log entry.</p>
+      <p class="small muted">Undo only touches the values this calibration set, and skips any you've edited again since.</p>`
+      : `<p>This result was only logged, so the profile won't change.</p>`}
+    <div class="actions">
+      ${applied ? `<button class="primary" value="undo">Remove and undo the change</button>` : ""}
+      <button class="${applied ? "" : "primary"}" value="remove">${applied ? "Just remove the entry" : "Remove"}</button>
+      <button value="cancel" formnovalidate>Cancel</button></div>`,
+  async (_fd, _form, choice) => {
+    const undo = choice === "undo";
+    const r = await api(`/api/calibrations/${b.dataset.delcal}?undo=${undo}`, { method: "DELETE" });
+    const names = (keys) => keys.map((k) => state.meta.fields.find((f) => f.key === k)?.label || k).join(", ");
+    toast(undo ? (r.reverted.length ? `Removed and undid: ${names(r.reverted)}` : "Removed (nothing left to undo)")
+      + (r.kept.length ? `. Kept your later edits to ${names(r.kept)}` : "") : "Entry removed");
+    refresh();
+  });
 });
 
 function calCard(c) {
@@ -431,7 +454,7 @@ function calCard(c) {
     ${c.notes ? `<div class="small muted">${esc(c.notes)}</div>` : ""}
     ${c.photos?.length ? `<div class="photos">${c.photos.map((ph) =>
       `<a href="/photos/${encodeURIComponent(ph)}" target="_blank"><img src="/photos/${encodeURIComponent(ph)}" alt="calibration photo"></a>`).join("")}</div>` : ""}
-    <button class="link small" data-delcal="${c.id}">remove entry</button>
+    <button type="button" class="link small" data-delcal="${c.id}" data-applied="${c.applied ? 1 : 0}">remove entry</button>
   </div>`;
 }
 
@@ -562,8 +585,9 @@ const renderCalTest = guard(async () => {
   });
   const readInputs = () => Object.fromEntries(t.inputs.filter(visible).map((i) => [i.key, form.elements[i.key].value.trim()]));
   const needsInput = () => t.inputs.filter(visible).some((i) => i.default === undefined && !form.elements[i.key].value.trim());
+  const box = $("#cal-result", form);  // this step's own box, so a late reply can't land on the next step
   const preview = async () => {
-    const box = $("#cal-result");
+    if (!form.isConnected) return;
     if (needsInput()) {
       box.className = "result muted"; box.textContent = "Enter your reading to see the new value."; return;
     }
@@ -591,6 +615,7 @@ const renderCalTest = guard(async () => {
   });
   form.onsubmit = guard(async (ev) => {
     ev.preventDefault();
+    clearTimeout(timer);
     if (needsInput() && !form.elements.unsure.checked) { toast("Fill in your reading first", true); return; }
     const fd = new FormData();
     fd.append("test", t.id);
