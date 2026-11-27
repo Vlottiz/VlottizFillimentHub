@@ -119,3 +119,19 @@ dialog h2 { margin-top: 0; }
 #toast.err { background: var(--bad); color: #fff; }
 .empty { text-align: center; padding: 40px; color: var(--muted); background: var(--panel); border: 1px dashed var(--line); border-radius: var(--radius); }
 .detail, .card, .history { overflow-wrap: anywhere; }
+
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--line); margin-left: 4px; vertical-align: middle; }
+.dot.ready { background: var(--good); } .dot.busy { background: var(--warn); } .dot.error { background: var(--bad); }
+.progress { height: 10px; border-radius: 99px; background: var(--panel-2); overflow: hidden; margin: 8px 0; }
+.progress > div { height: 100%; background: var(--accent); transition: width .3s; }
+.progress.indeterminate > div { width: 30% !important; animation: slide 1.2s infinite ease-in-out; }
+@keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+.aibox { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 14px; background: var(--panel-2); }
+.aibox summary { cursor: pointer; font-weight: 600; }
+.found { font-size: 12px; margin-top: 8px; }
+.found li { margin: 3px 0; }
+.st { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 11px; color: #fff; }
+.st.verified { background: var(--good); } .st.unverified { background: var(--warn); } .st.rejected { background: var(--bad); }
+input.ai-verified, select.ai-verified { box-shadow: 0 0 0 2px var(--good); }
+input.ai-unverified, select.ai-unverified { box-shadow: 0 0 0 2px var(--warn); }
+#ai-form .row { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }

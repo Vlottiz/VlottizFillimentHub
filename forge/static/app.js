@@ -60,7 +60,7 @@ function show(view) {
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + view));
   ({ filaments: renderFilaments, profiles: loadProfiles, calibrate: renderCalibrate,
-    printers: renderPrinters, backup: renderBackup })[view]?.();
+    printers: renderPrinters, backup: renderBackup, ai: renderAI })[view]?.();
   try { localStorage.setItem("ff-view", view); } catch {}
 }
 $$("#tabs button").forEach((b) => (b.onclick = () => show(b.dataset.view)));
@@ -121,8 +121,21 @@ function filamentForm(f = {}) {
   const mats = state.meta.materials.map((m) =>
     `<option ${m.name === (f.material || "PLA") ? "selected" : ""}>${esc(m.name)}</option>`).join("");
   const v = (x) => esc(x ?? "");
-  openDialog(`
+  const form = openDialog(`
     <h2>${f.id ? "Edit filament" : "Add filament"}</h2>
+    <details class="aibox" ${f.id ? "" : "open"}>
+      <summary>Fill in with AI from a link, PDF, photo or text</summary>
+      <p class="small muted" style="margin:6px 0 8px">Best sources: the maker's product page, the technical data sheet (PDF), or a photo of
+        the spool label. Values found on the page get a green outline; amber means check it yourself.</p>
+      <div class="row two">
+        <div><label>Store or product page link</label><input type="url" id="ai-url" placeholder="https://…"></div>
+        <div><label>…or a PDF / photo / saved page</label><input type="file" id="ai-file" accept=".pdf,image/*,.html,.htm,.txt"></div>
+      </div>
+      <div><label>…or paste the product text</label><textarea id="ai-text" rows="2"></textarea></div>
+      <div class="actions" style="margin-top:8px"><button type="button" class="primary" id="ai-go">Read it</button>
+        <span id="ai-msg" class="small muted" style="align-self:center"></span></div>
+      <div id="ai-found"></div>
+    </details>
     <div class="row">
       <div><label>Brand</label><input name="brand" value="${v(f.brand)}" placeholder="e.g. Polymaker"></div>
       <div><label>Name *</label><input name="name" required value="${v(f.name)}" placeholder="e.g. PolyTerra PLA"></div>
@@ -169,6 +182,65 @@ function filamentForm(f = {}) {
     toast("Saved");
     renderFilaments();
   });
+  wireAIFill(form);
+}
+
+const FIELD_LABEL = { brand: "Brand", product_name: "Name", material: "Material", colour_name: "Colour",
+  diameter: "Diameter", nozzle_min: "Nozzle min", nozzle_max: "Nozzle max", bed_min: "Bed min", bed_max: "Bed max",
+  density: "Density", max_volumetric_speed: "Max flow", max_print_speed: "Max print speed", weight_g: "Weight",
+  drying: "Drying", price: "Price", currency: "Currency" };
+const FORM_TARGET = { brand: "brand", product_name: "name", colour_name: "colour_name", diameter: "diameter",
+  weight_g: "weight_g", price: "price", currency: "currency", nozzle_min: "spec.nozzle_min",
+  nozzle_max: "spec.nozzle_max", bed_min: "spec.bed_min", bed_max: "spec.bed_max", density: "spec.density",
+  max_volumetric_speed: "spec.max_volumetric_speed" };
+
+function wireAIFill(form) {
+  const go = $("#ai-go", form);
+  if (!go) return;
+  go.onclick = async () => {
+    const msg = $("#ai-msg", form), found = $("#ai-found", form);
+    const st = await api("/api/ai/status").catch(() => null);
+    if (!st || st.state !== "ready") {
+      msg.innerHTML = `AI isn't running. <a href="#" id="ai-goto">Set it up in the AI tab</a>.`;
+      $("#ai-goto", form).onclick = (e) => { e.preventDefault(); $("#dlg").close(); show("ai"); };
+      return;
+    }
+    const fd = new FormData();
+    const url = $("#ai-url", form).value.trim(), file = $("#ai-file", form).files[0], text = $("#ai-text", form).value;
+    if (url) fd.append("url", url); else if (file) fd.append("file", file); else if (text.trim()) fd.append("text", text);
+    else { msg.textContent = "Add a link, a file or some text first."; return; }
+    go.disabled = true;
+    msg.textContent = "Reading… (can take a minute without a graphics card)";
+    found.innerHTML = "";
+    try {
+      const r = await api("/api/ai/extract", { method: "POST", body: fd });
+      const set = (name, value, status) => {
+        const el = form.elements[name];
+        if (!el || value == null) return;
+        el.value = value;
+        el.classList.remove("ai-verified", "ai-unverified");
+        el.classList.add(status === "verified" ? "ai-verified" : "ai-unverified");
+      };
+      for (const [k, v] of Object.entries(r.fields)) {
+        if (v.status !== "rejected" && FORM_TARGET[k]) set(FORM_TARGET[k], v.value, v.status);
+      }
+      if (r.form.material) set("material", r.form.material, r.fields.material?.status || "unverified");
+      if (r.form.notes) {
+        const n = form.elements.notes;
+        if (!n.value.includes(r.form.notes)) n.value = (n.value ? n.value + "\n" : "") + r.form.notes;
+      }
+      const rows = Object.entries(r.fields);
+      msg.textContent = rows.length ? `Found ${rows.filter(([, v]) => v.status !== "rejected").length} values. Check them, then Save.`
+        : "Nothing useful found. Try another source.";
+      found.innerHTML = rows.length ? `<ul class="found">${rows.map(([k, v]) => `<li>
+        <span class="st ${v.status}">${v.status === "verified" ? "found on page" : v.status === "unverified" ? "check" : "ignored"}</span>
+        <b>${esc(FIELD_LABEL[k] || k)}:</b> ${esc(v.value)}
+        ${v.quote ? `<span class="muted">— “${esc(v.quote)}”</span>` : ""}
+        ${v.reason ? `<span class="muted">(${esc(v.reason)})</span>` : ""}</li>`).join("")}</ul>` : "";
+    } catch (e) {
+      msg.innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`;
+    } finally { go.disabled = false; }
+  };
 }
 
 function printerOptions(selected) {
@@ -646,6 +718,113 @@ async function renderBackup() {
   };
 }
 
+/* ======================= AI ======================= */
+const MODELS = [
+  ["qwen2.5vl:7b", "Reads text and photos. ~6 GB. Recommended."],
+  ["gemma3:4b", "Reads text and photos. ~3 GB. Lighter, a bit less accurate."],
+  ["llama3.1:8b", "Text only. ~5 GB."],
+  ["qwen2.5:7b", "Text only. ~5 GB."],
+];
+const BUSY = new Set(["checking", "downloading", "verifying", "extracting", "starting", "pulling"]);
+
+function aiDot(st) {
+  const d = $("#ai-dot");
+  d.className = "dot " + (st.state === "ready" ? "ready" : st.state === "error" ? "error" : BUSY.has(st.state) ? "busy" : "");
+}
+
+async function pollAI() {
+  clearTimeout(pollAI._t);
+  const st = await api("/api/ai/status").catch(() => null);
+  if (!st) return;
+  aiDot(st);
+  if ($("#view-ai").classList.contains("active")) drawAIStatus(st);
+  if (BUSY.has(st.state) || st.busy) pollAI._t = setTimeout(pollAI, 1000);
+}
+
+function drawAIStatus(st) {
+  const box = $("#ai-status");
+  if (!box) return;
+  const pct = st.progress != null ? Math.round(st.progress * 100) : null;
+  box.innerHTML = `
+    <div class="title">${st.state === "ready" ? "✅ Ready" : st.state === "error" ? "⚠️ Problem" : BUSY.has(st.state) ? "Working…" : "Off"}</div>
+    <p>${esc(st.message)}</p>
+    ${BUSY.has(st.state) ? `<div class="progress ${pct == null ? "indeterminate" : ""}"><div style="width:${pct ?? 0}%"></div></div>
+      <p class="small muted">${pct != null ? pct + "% " : ""}${esc(st.detail || "")}</p>` : ""}
+    <dl class="kv small">
+      <dt>Engine</dt><dd>${st.running ? `running at ${esc(st.url)}` : "not running"}</dd>
+      ${st.gpu ? `<dt>Graphics</dt><dd>${esc(st.gpu)}</dd>` : ""}
+      <dt>Disk used</dt><dd>${st.disk_gb} GB</dd>
+    </dl>
+    <div class="actions">
+      ${st.running || BUSY.has(st.state)
+        ? `<button id="ai-stop">${BUSY.has(st.state) ? "Cancel" : "Stop"}</button>`
+        : `<button class="primary" id="ai-start">${st.settings.mode === "bundled" && !st.installed ? "Download & start" : "Start"}</button>`}
+      ${st.disk_gb > 0 ? `<button class="danger" id="ai-remove">Remove AI files</button>` : ""}
+    </div>`;
+  $("#ai-start")?.addEventListener("click", guard(async () => { await api("/api/ai/start", { method: "POST" }); pollAI(); }));
+  $("#ai-stop")?.addEventListener("click", guard(async () => {
+    await api("/api/ai/settings", { method: "PUT", json: { enabled: false } }); pollAI(); }));
+  $("#ai-remove")?.addEventListener("click", guard(async () => {
+    if (!confirm(`Delete the AI engine and models (${st.disk_gb} GB)? You can download them again later.`)) return;
+    await api("/api/ai/uninstall", { method: "POST" }); pollAI(); }));
+}
+
+async function renderAI() {
+  const st = await api("/api/ai/status");
+  const s = st.settings;
+  const sel = (name, opts) => `<select name="${name}">${opts.map(([v, l]) =>
+    `<option value="${v}" ${s[name] === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  $("#ai-body").innerHTML = `
+    <div class="cards wide">
+      <div class="card" id="ai-status"></div>
+      <div class="card">
+        <div class="title">How it works</div>
+        <ul class="small">
+          <li>Runs a small AI model on <b>your</b> computer with Ollama. Nothing is sent to an AI company.</li>
+          <li>It only runs while this app is open, and is stopped when you close the app.</li>
+          <li>First start downloads the engine (~1.6 GB) and a model (3–6 GB). After that it starts in seconds.</li>
+          <li>With an NVIDIA or AMD graphics card a page takes a few seconds. Without one, expect 30–90 seconds.</li>
+        </ul>
+      </div>
+    </div>
+    <h2>Settings</h2>
+    <form id="ai-form" class="card">
+      <div class="row">
+        <div><label>How to run it</label>${sel("mode", [["bundled", "Built in (recommended)"], ["docker", "Docker container"],
+          ["external", "My own Ollama"]])}</div>
+        <div><label>Graphics card</label>${sel("gpu", [["auto", "Detect automatically"], ["nvidia", "NVIDIA"], ["amd", "AMD"], ["cpu", "None / CPU only"]])}</div>
+        <div><label>Model</label><input name="model" list="ai-models" value="${esc(s.model)}"></div>
+        <div class="ext"><label>Your Ollama address</label><input name="external_url" value="${esc(s.external_url)}"></div>
+      </div>
+      <datalist id="ai-models">${MODELS.map(([m, d]) => `<option value="${m}">${esc(d)}</option>`).join("")}</datalist>
+      <ul class="small muted">${MODELS.map(([m, d]) => `<li><code>${m}</code> — ${esc(d)}</li>`).join("")}</ul>
+      <p class="small muted mode-note"></p>
+      <div class="actions"><button class="primary" type="submit">Save settings</button></div>
+    </form>`;
+  const form = $("#ai-form");
+  const notes = {
+    bundled: "Downloads Ollama into this app's data folder and runs it in the background. No admin rights or Docker needed.",
+    docker: "Needs Docker Desktop running. GPU works with NVIDIA cards only. The container is removed when the app closes; models are kept.",
+    external: "Uses an Ollama you installed yourself. This app won't start or stop it.",
+  };
+  const sync = () => {
+    $(".ext", form).style.display = form.elements.mode.value === "external" ? "" : "none";
+    $(".mode-note", form).textContent = notes[form.elements.mode.value];
+  };
+  form.elements.mode.onchange = sync;
+  sync();
+  form.onsubmit = guard(async (ev) => {
+    ev.preventDefault();
+    const body = Object.fromEntries(new FormData(form).entries());
+    await api("/api/ai/settings", { method: "PUT", json: body });
+    toast("Saved");
+    pollAI();
+  });
+  drawAIStatus(st);
+  aiDot(st);
+  if (BUSY.has(st.state) || st.busy) pollAI();
+}
+
 /* ---------- boot ---------- */
 (async () => {
   try {
@@ -654,5 +833,6 @@ async function renderBackup() {
     let view = "filaments";
     try { view = localStorage.getItem("ff-view") || view; } catch {}
     show(view);
+    pollAI();
   } catch (e) { toast("Couldn't reach the app server: " + e.message, true); }
 })();

@@ -9,7 +9,9 @@ A small local app for building, calibrating and keeping track of OrcaSlicer fila
 - **Export to Orca:** download a `.json` to import, or install it straight into Orca's user preset folder.
 - **History and backups:** every change is versioned and can be restored. You can also snapshot all your Orca filament presets, so an Orca update can't lose them.
 
-Everything runs on your computer. Nothing is uploaded anywhere.
+- **AI fill-in (optional):** paste a store-page link, PDF data sheet, photo of the spool label, or product text, and a local AI model fills in the filament form. Every value is checked against the page before it's trusted.
+
+Everything runs on your computer. Nothing is uploaded anywhere, including the AI.
 
 ## Run it
 
@@ -52,6 +54,27 @@ Orca's folders:
 
 `<account>` is `default` when you're not logged in to Orca. If your Orca lives elsewhere, set the `ORCA_CONFIG_DIR` environment variable to the folder before starting the app.
 
+## AI helper
+
+Open the **AI** tab and click **Download & start**. The app:
+
+1. Detects your graphics card (NVIDIA, AMD, or none).
+2. Downloads Ollama's portable build (~1.6 GB, plus an AMD add-on if needed) into `data/ollama`, checking its checksum.
+3. Downloads the AI model (default `qwen2.5vl:7b`, ~6 GB, which reads text and photos).
+4. Runs it in the background **only while Filament Forge is open**. Closing the app stops it. On Windows it's tied to the app's process, so even closing the window or a crash kills it. Elsewhere, a leftover from a crash is cleaned up on the next launch.
+
+After the first setup it starts automatically with the app in a few seconds. Then use **Fill in with AI** at the top of the Add filament form.
+
+How it stays accurate:
+- The app downloads and cleans the page itself. The model only reads text and fills a fixed form, so it can't wander off.
+- It must quote the sentence each value came from, and the app checks that quote is really on the page. Green outline: found on the page. Amber: check it yourself. Values outside sensible ranges are ignored.
+
+Other ways to run it (AI tab → Settings):
+- **Docker:** runs the `ollama/ollama` container while the app is open and removes it on close. GPU support needs an NVIDIA card.
+- **My own Ollama:** point it at an Ollama you already run.
+
+Tips: big stores like Amazon often block apps. The maker's own page, the technical data sheet PDF, or a screenshot work best. **Remove AI files** frees the disk space again.
+
 ## Backups
 
 **Orca & backup** tab:
@@ -62,7 +85,6 @@ Orca's folders:
 
 ## Roadmap
 
-- Read a store page, photo or PDF and fill in the filament specs automatically
 - Look up community settings online and fold them into the confidence score
 - Suggest calibration readings from photos of the test print
 - Per-toolhead profiles for the U1
