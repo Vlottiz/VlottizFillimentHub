@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS exports (
     preset_name TEXT, content TEXT NOT NULL,
     target TEXT, created REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS orca_snapshots (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL, name TEXT, content TEXT NOT NULL,
@@ -121,6 +125,16 @@ class DB:
 
     def delete(self, table: str, row_id: int) -> None:
         self.conn.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+        self.conn.commit()
+
+    # -- app settings (JSON values) ---------------------------------------
+    def get_setting(self, key: str, default=None):
+        row = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def set_setting(self, key: str, value) -> None:
+        self.conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+                          "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, json.dumps(value)))
         self.conn.commit()
 
     # -- profiles with history -------------------------------------------
