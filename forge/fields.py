@@ -1,0 +1,32 @@
+"""Labels and grouping for the settings shown in the profile editor."""
+
+FIELDS = [
+    # key, label, unit, group, input step
+    ("filament_type", "Material type", "", "Basics", None),
+    ("filament_vendor", "Vendor", "", "Basics", None),
+    ("default_filament_colour", "Colour", "", "Basics", None),
+    ("filament_diameter", "Diameter", "mm", "Basics", 0.01),
+    ("filament_density", "Density", "g/cm³", "Basics", 0.01),
+    ("filament_cost", "Cost", "per kg", "Basics", 0.01),
+    ("nozzle_temperature", "Nozzle", "°C", "Temperature", 1),
+    ("nozzle_temperature_initial_layer", "Nozzle, first layer", "°C", "Temperature", 1),
+    ("nozzle_temperature_range_low", "Recommended range, low", "°C", "Temperature", 1),
+    ("nozzle_temperature_range_high", "Recommended range, high", "°C", "Temperature", 1),
+    ("hot_plate_temp", "Smooth PEI bed", "°C", "Temperature", 1),
+    ("hot_plate_temp_initial_layer", "Smooth PEI bed, first layer", "°C", "Temperature", 1),
+    ("textured_plate_temp", "Textured PEI bed", "°C", "Temperature", 1),
+    ("textured_plate_temp_initial_layer", "Textured PEI bed, first layer", "°C", "Temperature", 1),
+    ("temperature_vitrification", "Softening temperature", "°C", "Temperature", 1),
+    ("filament_flow_ratio", "Flow ratio", "", "Flow", 0.001),
+    ("filament_max_volumetric_speed", "Max volumetric speed", "mm³/s", "Flow", 0.5),
+    ("enable_pressure_advance", "Use pressure advance from this profile", "0/1", "Flow", 1),
+    ("pressure_advance", "Pressure advance", "", "Flow", 0.001),
+    ("filament_retraction_length", "Retraction length (blank = printer's)", "mm", "Retraction", 0.05),
+    ("filament_retraction_speed", "Retraction speed (blank = printer's)", "mm/s", "Retraction", 1),
+    ("fan_min_speed", "Fan min", "%", "Cooling", 1),
+    ("fan_max_speed", "Fan max", "%", "Cooling", 1),
+    ("overhang_fan_speed", "Overhang fan", "%", "Cooling", 1),
+    ("close_fan_the_first_x_layers", "No fan for first", "layers", "Cooling", 1),
+    ("fan_cooling_layer_time", "Full fan when layer under", "s", "Cooling", 1),
+    ("slow_down_layer_time", "Slow down when layer under", "s", "Cooling", 1),
+]

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Filament Forge</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">Filament Forge</div>
+  <nav id="tabs">
+    <button data-view="filaments" class="active">Filaments</button>
+    <button data-view="profiles">Profiles</button>
+    <button data-view="calibrate">Calibrate</button>
+    <button data-view="printers">Printers</button>
+    <button data-view="backup">Orca &amp; backup</button>
+  </nav>
+</header>
+
+<main>
+  <section id="view-filaments" class="view active">
+    <div class="bar">
+      <h1>Filament log</h1>
+      <input id="fil-search" type="search" placeholder="Search brand, name, colour…">
+      <button class="primary" id="add-filament">+ Add filament</button>
+    </div>
+    <div id="filament-list" class="cards"></div>
+  </section>
+
+  <section id="view-profiles" class="view">
+    <div class="split">
+      <aside>
+        <div class="bar"><h1>Profiles</h1></div>
+        <div id="profile-list" class="list"></div>
+      </aside>
+      <div id="profile-detail" class="detail"><p class="muted">Choose a profile, or make one from a filament in the Filaments tab.</p></div>
+    </div>
+  </section>
+
+  <section id="view-calibrate" class="view">
+    <div class="bar">
+      <h1>Calibrate</h1>
+      <select id="cal-profile" style="max-width:420px"></select>
+    </div>
+    <div id="cal-body"></div>
+  </section>
+
+  <section id="view-printers" class="view">
+    <div class="bar">
+      <h1>Printers</h1>
+      <button id="add-printer">+ Add printer</button>
+    </div>
+    <div id="printer-list" class="cards wide"></div>
+  </section>
+
+  <section id="view-backup" class="view">
+    <div class="bar"><h1>Orca &amp; backup</h1></div>
+    <div id="backup-body"></div>
+  </section>
+</main>
+
+<dialog id="dlg"><form method="dialog" id="dlg-form"></form></dialog>
+<div id="toast" role="status"></div>
+<script src="app.js"></script>
+</body>
+</html>
