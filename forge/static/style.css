@@ -119,3 +119,15 @@ dialog h2 { margin-top: 0; }
 #toast.err { background: var(--bad); color: #fff; }
 .empty { text-align: center; padding: 40px; color: var(--muted); background: var(--panel); border: 1px dashed var(--line); border-radius: var(--radius); }
 .detail, .card, .history { overflow-wrap: anywhere; }
+
+.guide { display: flex; flex-direction: column; gap: 12px; margin: 14px 0 18px; }
+.gstep { display: flex; gap: 12px; align-items: flex-start; }
+.gstep .num { flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+  display: grid; place-items: center; font-weight: 700; font-size: 13px; }
+.gstep p, .gstep ul { margin: 4px 0; }
+.gstep ul { padding-left: 18px; }
+.gstep > div { min-width: 0; }
+.example { background: var(--panel-2); border-left: 3px solid var(--accent); padding: 6px 10px; border-radius: 4px; }
+.diagram-wrap { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.diagram-wrap p { flex: 1; min-width: 200px; }
+.diagram { width: 220px; max-width: 100%; height: auto; }

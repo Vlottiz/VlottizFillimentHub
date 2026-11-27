@@ -215,3 +215,36 @@ def test_full_flow(client, tmp_path):
 
     zall = zipfile.ZipFile(io.BytesIO(client.get("/api/export-all").content))
     assert len(zall.namelist()) == 2
+
+
+@pytest.mark.parametrize("test,inputs,current,expected", [
+    ("flow_yolo", {"modifier": "-0.04"}, {"filament_flow_ratio": 0.98}, 0.94),
+    ("flow_yolo", {"modifier": "-0,035"}, {"filament_flow_ratio": 1.0}, 0.965),    # comma decimal
+    ("flow_yolo", {"modifier": ".015"}, {"filament_flow_ratio": 1.0}, 1.015),
+    ("flow_pass1", {"modifier": " -5 "}, {"filament_flow_ratio": 0.98}, 0.931),
+    ("pressure_advance", {"method": "pattern", "pa": "0.032"}, {}, 0.032),
+    ("pressure_advance", {"method": "pattern", "pa": "0,045"}, {}, 0.045),
+    ("pressure_advance", {"method": "tower", "start": "0", "step": "0.002", "height": "16"}, {}, 0.032),
+    ("retraction", {"start": "0", "step": "0.1", "height": "7.5"}, {}, 0.75),
+    ("max_flow", {"start": "5", "step": "0.5", "height": "22.5", "margin": "10"}, {}, 14.6),
+])
+def test_calibration_accepts_decimal_text(test, inputs, current, expected):
+    assert calibration.compute(test, inputs, current)["new"] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("test,inputs,msg", [
+    ("pressure_advance", {"pa": "-0.04"}, "can't be negative"),
+    ("flow_pass1", {"modifier": "-0.04"}, "YOLO"),
+    ("flow_yolo", {"modifier": "-5"}, "pass 1"),
+    ("pressure_advance", {"pa": "abc"}, "isn't a number"),
+    ("retraction", {"height": ""}, "Fill in"),
+])
+def test_calibration_helpful_errors(test, inputs, msg):
+    with pytest.raises(ValueError, match=msg):
+        calibration.compute(test, inputs, {"filament_flow_ratio": 0.98})
+
+
+def test_every_test_has_full_guidance():
+    for t in calibration.tests_for_ui():
+        for key in ("orca_menu", "setup", "what_you_get", "measure", "enter", "example", "inputs"):
+            assert t.get(key), (t["id"], key)

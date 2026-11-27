@@ -405,28 +405,67 @@ async function renderCalibrate() {
 }
 $("#cal-profile").onchange = () => { state.calProfile = Number($("#cal-profile").value); renderCalTest(); };
 
+const HEIGHT_DIAGRAM = `<svg viewBox="0 0 220 170" class="diagram" role="img" aria-label="Measure from the bed up to where the change happens">
+  <rect x="10" y="150" width="200" height="10" rx="2" fill="var(--line)"/>
+  <text x="110" y="168" font-size="9" text-anchor="middle" fill="var(--muted)">bed side / bottom of print</text>
+  <rect x="70" y="20" width="60" height="130" fill="var(--panel-2)" stroke="var(--muted)"/>
+  ${[...Array(12).keys()].map((i) => `<line x1="70" x2="130" y1="${30 + i * 10}" y2="${30 + i * 10}" stroke="var(--line)"/>`).join("")}
+  <rect x="70" y="66" width="60" height="10" fill="var(--accent)" opacity=".35"/>
+  <line x1="62" x2="134" y1="71" y2="71" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"/>
+  <text x="138" y="68" font-size="10" fill="var(--accent)">the change</text>
+  <text x="138" y="80" font-size="10" fill="var(--accent)">happens here</text>
+  <line x1="40" x2="40" y1="148" y2="73" stroke="var(--text)" stroke-width="1.5" marker-end="url(#arr)" marker-start="url(#arr)"/>
+  <text x="34" y="115" font-size="10" fill="var(--text)" text-anchor="middle" transform="rotate(-90 34 115)">measure this</text>
+  <defs><marker id="arr" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M0 0L10 5L0 10z" fill="var(--text)"/></marker></defs>
+</svg>`;
+
 const renderCalTest = guard(async () => {
   const p = await api(`/api/profiles/${state.calProfile}`);
   const tests = state.meta.tests;
   const done = new Set(p.calibrations.filter((c) => c.applied || c.test === "vfa").map((c) => c.test));
-  if (!state.calTest) state.calTest = (tests.find((t) => !done.has(t.id) && t.id !== "flow_yolo") || tests[0]).id;
+  if (!state.calTest) state.calTest = (tests.find((t) => !done.has(t.id) && !t.alt) || tests[0]).id;
   const t = tests.find((x) => x.id === state.calTest);
   const cur = t.setting ? p.settings[t.setting] : null;
+  const label = state.meta.fields.find((f) => f.key === t.setting)?.label || t.setting;
+
+  const inputHtml = (i) => {
+    const show = i.show_if ? `data-show-if="${esc(i.show_if[0])}=${esc(i.show_if[1])}"` : "";
+    if (i.type === "choice") {
+      return `<div ${show}><label>${esc(i.label)}</label><select name="${esc(i.key)}">${i.options.map(([v, l]) =>
+        `<option value="${esc(v)}" ${v === i.default ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>`;
+    }
+    // Plain text box: accepts any decimal, negatives and comma decimals (0,04). Checked by the server.
+    return `<div ${show}><label>${esc(i.label)}</label><input type="text" inputmode="decimal" autocomplete="off"
+      name="${esc(i.key)}" value="${esc(i.default ?? "")}" placeholder="${esc(i.placeholder ?? "")}"></div>`;
+  };
 
   $("#cal-body").innerHTML = `
     <p class="muted">Suggested order: temperature → flow → pressure advance → retraction → max flow. Export to Orca between steps so each
     test prints with the latest values.</p>
-    <div class="steps">${tests.map((x, i) => `<div class="step ${x.id === t.id ? "active" : ""} ${done.has(x.id) ? "done" : ""}" data-test="${x.id}">
-      <div class="n">${x.id === "flow_yolo" ? "Or instead of 2 + 3" : "Step " + x.order}</div><div>${esc(x.title)}</div></div>`).join("")}</div>
+    <div class="steps">${tests.map((x) => `<div class="step ${x.id === t.id ? "active" : ""} ${done.has(x.id) ? "done" : ""}" data-test="${x.id}">
+      <div class="n">${x.alt ? esc(x.alt) : "Step " + x.order}</div><div>${esc(x.title)}</div></div>`).join("")}</div>
     <div class="detail">
       <h2 style="margin-top:0">${esc(t.title)}</h2>
-      <p>In OrcaSlicer: <b>${esc(t.orca_menu)}</b>, with this filament profile selected.</p>
-      <ol>${t.howto.map((h) => `<li>${esc(h)}</li>`).join("")}</ol>
-      ${t.setting ? `<p class="small muted">Current ${esc(t.setting)}: <b>${esc(cur ?? "not set")}</b>
+      ${t.setting ? `<p class="small muted">Current ${esc(label)}: <b>${esc(cur ?? "not set")}</b>
         ${p.sources[t.setting] ? `<span class="src ${esc(p.sources[t.setting])}">${esc(SRC_LABEL[p.sources[t.setting]])}</span>` : ""}</p>` : ""}
-      <form id="cal-form">
-        <div class="row">${t.inputs.map((i) => `<div><label>${esc(i.label)}</label>
-          <input type="number" step="${i.step ?? "any"}" name="${esc(i.key)}" value="${esc(i.default ?? "")}"></div>`).join("")}</div>
+
+      <div class="guide">
+        <div class="gstep"><span class="num">1</span><div><b>Print it</b>
+          <p>In OrcaSlicer: <b>${esc(t.orca_menu)}</b>, with this filament profile selected.</p>
+          <ul>${t.setup.map((h) => `<li>${esc(h)}</li>`).join("")}</ul></div></div>
+        <div class="gstep"><span class="num">2</span><div><b>What you'll get</b><p>${esc(t.what_you_get)}</p></div></div>
+        <div class="gstep"><span class="num">3</span><div><b>How to judge or measure it</b>
+          <ul>${t.measure.map((h) => `<li>${esc(h)}</li>`).join("")}</ul>
+          ${t.measure_height ? `<div class="diagram-wrap">${HEIGHT_DIAGRAM}
+            <p class="small muted">Put one caliper jaw on the bottom of the print and the other at the point where the change happens.
+            Measure from the bottom of the print, not the top. A ruler works if you don't have calipers.</p></div>` : ""}</div></div>
+        <div class="gstep"><span class="num">4</span><div><b>What to type in</b><p>${esc(t.enter)}</p>
+          <p class="example"><b>Example:</b> ${esc(t.example)}</p></div></div>
+      </div>
+
+      <form id="cal-form" novalidate>
+        <div class="row">${t.inputs.map(inputHtml).join("")}</div>
         <div id="cal-result" class="result muted">Enter your reading to see the new value.</div>
         <label>Photos of the print (optional, for your records)</label>
         <div class="drop"><input type="file" name="photos" accept="image/*" multiple></div>
@@ -444,28 +483,43 @@ const renderCalTest = guard(async () => {
 
   $$(".step").forEach((s) => (s.onclick = () => { state.calTest = s.dataset.test; renderCalTest(); }));
   const form = $("#cal-form");
-  const readInputs = () => Object.fromEntries(t.inputs.map((i) => [i.key, form.elements[i.key].value]));
+  const visible = (i) => !i.show_if || form.elements[i.show_if[0]].value === i.show_if[1];
+  const syncVisible = () => $$("[data-show-if]", form).forEach((el) => {
+    const [k, v] = el.dataset.showIf.split("=");
+    el.style.display = form.elements[k].value === v ? "" : "none";
+  });
+  const readInputs = () => Object.fromEntries(t.inputs.filter(visible).map((i) => [i.key, form.elements[i.key].value.trim()]));
+  const needsInput = () => t.inputs.filter(visible).some((i) => i.default === undefined && !form.elements[i.key].value.trim());
   const preview = async () => {
     const box = $("#cal-result");
-    const inputs = readInputs();
-    if (t.inputs.some((i) => i.default === undefined && inputs[i.key] === "")) {
+    if (needsInput()) {
       box.className = "result muted"; box.textContent = "Enter your reading to see the new value."; return;
     }
     try {
-      const r = await api(`/api/profiles/${p.id}/calibrations/preview`, { json: { test: t.id, inputs } });
+      const r = await api(`/api/profiles/${p.id}/calibrations/preview`, { json: { test: t.id, inputs: readInputs() } });
       box.className = "result";
       box.innerHTML = r.setting
-        ? `New ${esc(r.setting)}: <b>${esc(r.new)}</b> <span class="muted">(was ${esc(r.old ?? "not set")})</span><br><span class="small muted">${esc(r.explanation)}</span>`
+        ? `New ${esc(label)}: <b>${esc(r.new)}</b> <span class="muted">(was ${esc(r.old ?? "not set")})</span><br><span class="small muted">${esc(r.explanation)}</span>`
         : esc(r.explanation);
     } catch (e) { box.className = "result"; box.innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`; }
   };
-  form.oninput = (ev) => { if (ev.target.type === "number") preview(); };
-  form.elements.photos.onchange = () => {
+  let timer;
+  const onEdit = (ev) => {
+    if (ev.target.name === "notes" || ev.target.type === "file" || ev.target.type === "checkbox") return;
+    syncVisible();
+    clearTimeout(timer);
+    timer = setTimeout(preview, 250);
+  };
+  form.oninput = onEdit;
+  form.onchange = onEdit;
+  syncVisible();
+  form.elements.photos.addEventListener("change", () => {
     $("#cal-thumbs").innerHTML = [...form.elements.photos.files].map((f) =>
       `<img src="${URL.createObjectURL(f)}" alt="">`).join("");
-  };
+  });
   form.onsubmit = guard(async (ev) => {
     ev.preventDefault();
+    if (needsInput() && !form.elements.unsure.checked) { toast("Fill in your reading first", true); return; }
     const fd = new FormData();
     fd.append("test", t.id);
     fd.append("inputs", JSON.stringify(readInputs()));
@@ -474,11 +528,11 @@ const renderCalTest = guard(async () => {
     for (const f of form.elements.photos.files) fd.append("photos", f);
     await api(`/api/profiles/${p.id}/calibrations`, { method: "POST", body: fd });
     toast(form.elements.unsure.checked ? "Logged (profile unchanged)" : "Saved and applied. Export to Orca before the next test.");
-    const next = tests.find((x) => x.order > t.order && x.id !== "flow_yolo");
+    const next = tests.find((x) => x.order > t.order && !x.alt);
     state.calTest = next ? next.id : t.id;
     renderCalTest();
   });
-  if (t.inputs.every((i) => i.default !== undefined)) preview();
+  if (!needsInput()) preview();
 });
 
 /* ======================= PRINTERS ======================= */
