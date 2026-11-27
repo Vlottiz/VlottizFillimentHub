@@ -2,12 +2,14 @@
 
 
 import io
+import re
 import sqlite3
 import json
 import os
 import secrets
 import time
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -16,12 +18,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import calibration, klipper, materials, orca, tuning
+from .ai import extract as ai_extract
+from .ai.runtime import OllamaManager
 from .db import DB
 from .fields import FIELDS
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("FORGE_DATA_DIR", ROOT.parent / "data"))
 PHOTO_DIR = DATA_DIR / "photos"
+MAX_UPLOAD = 20_000_000
 PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
 
 # Starting point for the Snapmaker U1, taken from OrcaSlicer's own U1 machine
@@ -45,10 +50,26 @@ SNAPMAKER_U1 = {
 }
 
 
-def create_app(db_path: str | Path | None = None) -> FastAPI:
+def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> FastAPI:
     db = DB(db_path or DATA_DIR / "forge.db")
-    app = FastAPI(title="Filament Forge")
+    ai = OllamaManager(DATA_DIR, db.get_setting("ai", {}))
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        # The AI engine only runs while this app runs.
+        if manage_ai:
+            ai.cleanup_stale()
+            if ai.settings["enabled"]:
+                ai.start_async()
+        try:
+            yield
+        finally:
+            if manage_ai:
+                ai.stop()
+
+    app = FastAPI(title="Filament Forge", lifespan=lifespan)
     app.state.db = db
+    app.state.ai = ai
 
     if not db.one("SELECT id FROM printers LIMIT 1"):
         db.insert("printers", {"name": SNAPMAKER_U1["name"], "data": SNAPMAKER_U1["data"]})
@@ -587,6 +608,83 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
                 PHOTO_DIR.mkdir(parents=True, exist_ok=True)
                 (PHOTO_DIR / Path(name).name).write_bytes(z.read(name))
         return {"ok": True, "safety_copy": str(safety)}
+
+    # --------------------------------------------------------------------- AI
+    class AISettings(BaseModel):
+        enabled: bool | None = None
+        mode: str | None = None
+        gpu: str | None = None
+        model: str | None = None
+        external_url: str | None = None
+        port: int | None = None
+
+    @app.get("/api/ai/status")
+    def ai_status():
+        s = ai.snapshot()
+        s["disk_gb"] = ai.disk_usage_gb()
+        return s
+
+    @app.put("/api/ai/settings")
+    def ai_settings(body: AISettings):
+        changes = body.model_dump(exclude_none=True)
+        if "mode" in changes and changes["mode"] not in ("bundled", "docker", "external"):
+            raise HTTPException(400, "mode must be bundled, docker or external")
+        if "gpu" in changes and changes["gpu"] not in ("auto", "nvidia", "amd", "cpu"):
+            raise HTTPException(400, "gpu must be auto, nvidia, amd or cpu")
+        if "model" in changes and not re.fullmatch(r"[\w./:-]{1,100}", changes["model"]):
+            raise HTTPException(400, "That doesn't look like an Ollama model name")
+        restart = any(k in changes and changes[k] != ai.settings.get(k)
+                      for k in ("mode", "port", "external_url", "gpu"))
+        if restart:
+            ai.stop()
+        ai.settings.update(changes)
+        db.set_setting("ai", ai.settings)
+        if ai.settings["enabled"] and manage_ai:
+            ai.start_async()  # also pulls a newly chosen model
+        elif not ai.settings["enabled"]:
+            ai.stop()
+        return ai_status()
+
+    @app.post("/api/ai/start")
+    def ai_start():
+        ai.settings["enabled"] = True
+        db.set_setting("ai", ai.settings)
+        ai.start_async()
+        return ai_status()
+
+    @app.post("/api/ai/stop")
+    def ai_stop():
+        ai.stop()
+        return ai_status()
+
+    @app.post("/api/ai/uninstall")
+    def ai_uninstall():
+        ai.uninstall()
+        ai.settings["enabled"] = False
+        db.set_setting("ai", ai.settings)
+        return ai_status()
+
+    @app.post("/api/ai/extract")
+    def ai_extract_route(
+        url: str | None = Form(None),
+        text: str | None = Form(None),
+        file: UploadFile | None = File(None),
+    ):
+        if not ai.ready():
+            raise HTTPException(409, "The AI isn't ready yet. Set it up in the AI tab first.")
+        data = name = None
+        if file is not None and file.filename:
+            data = file.file.read(MAX_UPLOAD + 1)
+            if len(data) > MAX_UPLOAD:
+                raise HTTPException(400, "That file is over 20 MB")
+            name = file.filename
+        try:
+            return ai_extract.extract(ai.chat, url=(url or "").strip() or None, text=text,
+                                      file_bytes=data, filename=name)
+        except ai_extract.FetchError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(502, f"AI step failed: {e}")
 
     @app.exception_handler(HTTPException)
     async def http_err(_, exc: HTTPException):
