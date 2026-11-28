@@ -19,7 +19,8 @@ from pydantic import BaseModel
 
 from . import calibration, klipper, materials, orca, paths, swatch, troubleshoot, tuning
 from .ai import extract as ai_extract
-from .ai.runtime import OllamaManager
+from .ai.images import shrink as shrink_image
+from .ai.runtime import CONTEXT_CHOICES, OllamaManager
 from .db import DB, SCHEMA as SCHEMA_SQL
 from .fields import FIELDS
 
@@ -378,7 +379,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             (PHOTO_DIR / name).write_bytes(data)
             names.append(name)
             blobs.append(data)
-        return names, blobs[:4]
+        return names, [shrink_image(b) for b in blobs[:4]]
 
     def _session_view(sess: dict) -> dict:
         diag = sess["diagnosis"] or {}
@@ -386,6 +387,41 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             info = troubleshoot.ISSUES.get(it["id"], {})
             it["title"], it["tips"], it["looks_like"] = info.get("title"), info.get("tips", []), info.get("looks_like")
         return sess
+
+    def _troubleshoot_context(pid: int) -> dict:
+        """Things the suggestions can use, e.g. the speed your VFA test found smoothest."""
+        ctx = {}
+        for c in db.all("SELECT * FROM calibrations WHERE profile_id = ? AND test = 'vfa' ORDER BY id DESC", (pid,)):
+            try:
+                ctx["vfa_speed"] = calibration.compute("vfa", c["inputs"], {})["extra"]["_speed"]
+                break
+            except (ValueError, KeyError):
+                continue
+        return ctx
+
+    class ReplanIn(BaseModel):
+        issues: list[str]
+
+    @app.post("/api/troubleshoots/{sid}/replan")
+    def replan(sid: int, body: ReplanIn):
+        """You untick wrong guesses (or add the right problem); the suggestions are worked out again."""
+        sess = db.one("SELECT * FROM troubleshoots WHERE id = ?", (sid,))
+        if not sess:
+            raise HTTPException(404, "Not found")
+        if sess.get("trial_profile_id") and db.one("SELECT id FROM profiles WHERE id = ?", (sess["trial_profile_id"],)):
+            raise HTTPException(400, "A trial was already made from this report; delete it first or start a new report")
+        p = get_profile(sess["profile_id"])
+        ids = [i for i in dict.fromkeys(body.issues) if i in troubleshoot.ISSUES]
+        diag = sess["diagnosis"] or {}
+        old = {i["id"]: i for i in diag.get("issues", [])}
+        diag["issues"] = [old.get(i) or {"id": i, "confidence": None, "evidence": "You picked this."} for i in ids]
+        for i in diag["issues"]:
+            for k in ("title", "tips", "looks_like"):
+                i.pop(k, None)
+        diag["process"] = troubleshoot.process_suggestions(ids, _troubleshoot_context(p["id"]))
+        changes = troubleshoot.plan_changes(ids, p["settings"], printer_dict(p.get("printer_id")))
+        db.update("troubleshoots", sid, {"diagnosis": diag, "changes": changes, "updated": time.time()})
+        return _session_view(db.one("SELECT * FROM troubleshoots WHERE id = ?", (sid,)))
 
     @app.get("/api/issues")
     def issue_list():
@@ -413,8 +449,11 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             except Exception as e:
                 raise HTTPException(502, f"AI step failed: {e}")
             diag["by"] = "ai"
+        if diag["by"] == "ai":
+            diag["issues"] = troubleshoot.combine(diag["issues"], description)
         ids = [i["id"] for i in diag["issues"]]
         changes = troubleshoot.plan_changes(ids, p["settings"], printer_dict(p.get("printer_id")))
+        diag["process"] = troubleshoot.process_suggestions(ids, _troubleshoot_context(pid))
         sid = db.insert("troubleshoots", {"profile_id": pid, "description": description.strip()[:1000],
                                           "photos": names, "diagnosis": diag, "changes": changes,
                                           "status": "diagnosed", "updated": time.time()})
@@ -1025,6 +1064,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         model: str | None = None
         external_url: str | None = None
         port: int | None = None
+        context: int | None = None
 
     @app.get("/api/ai/status")
     def ai_status():
@@ -1039,6 +1079,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             raise HTTPException(400, "mode must be bundled, docker or external")
         if "gpu" in changes and changes["gpu"] not in ("auto", "nvidia", "amd", "cpu"):
             raise HTTPException(400, "gpu must be auto, nvidia, amd or cpu")
+        if "context" in changes and changes["context"] not in CONTEXT_CHOICES:
+            raise HTTPException(400, f"context must be one of {CONTEXT_CHOICES}")
         if "model" in changes and not re.fullmatch(r"[\w./:-]{1,100}", changes["model"]):
             raise HTTPException(400, "That doesn't look like an Ollama model name")
         restart = any(k in changes and changes[k] != ai.settings.get(k)
@@ -1086,6 +1128,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             if len(data) > MAX_UPLOAD:
                 raise HTTPException(400, "That file is over 20 MB")
             name = file.filename
+            if Path(name).suffix.lower() in PHOTO_EXT:
+                data = shrink_image(data)
         try:
             return ai_extract.extract(ai.chat, url=(url or "").strip() or None, text=text,
                                       file_bytes=data, filename=name)

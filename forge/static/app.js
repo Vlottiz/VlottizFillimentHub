@@ -408,8 +408,6 @@ async function fixDialog(p) {
     <div id="fix-pick" class="issue-pick" ${aiReady ? "hidden" : ""}>${issues.map((i) => `<label class="opt">
       <input type="checkbox" name="issue" value="${esc(i.id)}"> <span><b>${esc(i.title)}</b>
       <span class="small muted">${esc(i.looks_like)}</span></span></label>`).join("")}</div>
-    <label class="opt" style="margin-top:10px"><input type="checkbox" name="auto" checked>
-      Auto-tweak: make a trial profile with the changes (your original isn't touched)</label>
     <div class="actions"><button class="primary" type="button" id="fix-go">Find the problem</button>
       <button value="cancel" formnovalidate>Close</button></div>
     <div id="fix-result"></div>`, () => {});
@@ -419,6 +417,42 @@ async function fixDialog(p) {
   form.elements.photos.onchange = () => {
     $("#fix-thumbs", form).innerHTML = [...form.elements.photos.files].map((f) => `<img src="${URL.createObjectURL(f)}" alt="">`).join("");
   };
+  // Review step: untick wrong guesses / add the right problem, then make a trial (your original isn't touched).
+  const drawReview = (s) => {
+    const box = $("#fix-result", form), d = s.diagnosis;
+    const ids = new Set(d.issues.map((i) => i.id));
+    box.innerHTML = `<h3>What it found <span class="small muted">: untick anything that's wrong</span></h3>
+      ${d.issues.length ? d.issues.map((i) => `<label class="opt"><input type="checkbox" name="keep" value="${esc(i.id)}" checked>
+        <span><b>${esc(i.title)}</b> ${i.confidence != null ? `<span class="tag">${Math.round(i.confidence * 100)}% sure</span>` : ""}
+        ${i.evidence ? `<span class="small muted">${esc(i.evidence)}</span>` : ""}</span></label>`).join("")
+        : `<p>No clear problem found. ${esc(d.summary || "")} Try a closer, well-lit photo, or add the problem below.</p>`}
+      ${d.summary && d.issues.length ? `<p class="small">${esc(d.summary)}</p>` : ""}
+      <div class="row two" style="align-items:end">
+        <div><label>Add a problem it missed</label><select name="add"><option value="">…</option>${issues
+          .filter((i) => !ids.has(i.id)).map((i) => `<option value="${esc(i.id)}">${esc(i.title)}</option>`).join("")}</select></div>
+        <div><button type="button" id="fix-replan">Update suggestions</button></div>
+      </div>
+      ${s.changes.length ? `<h3>Filament changes (for the trial profile)</h3>${changeRows(s.changes)}` : d.issues.length
+        ? `<p class="small">No filament setting changes for this; see the print settings and tips below.</p>` : ""}
+      ${d.process?.length ? `<h3>Change in Orca's print (process) settings</h3><table class="settings changes">${d.process.map((x) => `<tr>
+        <td><b>${esc(x.setting)}</b><div class="small muted">${esc(x.why)}</div></td><td><b>${esc(x.value)}</b></td></tr>`).join("")}</table>` : ""}
+      ${d.issues.some((i) => i.tips?.length) ? `<h3>Tips</h3><ul class="small">${[...new Set(d.issues.flatMap((i) => i.tips || []))]
+        .map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+      <div class="actions">${s.changes.length ? `<button class="primary" type="button" id="fix-trial">Make a trial profile with these changes</button>` : ""}</div>
+      <p class="small muted">The trial is a copy; your original profile isn't touched until you say the trial printed better.</p>`;
+    $("#fix-replan", form).onclick = guard(async () => {
+      const keep = [...form.querySelectorAll("input[name=keep]:checked")].map((c) => c.value);
+      if (form.elements.add.value) keep.push(form.elements.add.value);
+      drawReview(await api(`/api/troubleshoots/${s.id}/replan`, { json: { issues: keep } }));
+    });
+    form.querySelectorAll("input[name=keep]").forEach((c) => (c.onchange = () => $("#fix-replan", form).click()));
+    form.elements.add.onchange = () => $("#fix-replan", form).click();
+    $("#fix-trial", form)?.addEventListener("click", guard(async () => {
+      const t = await api(`/api/troubleshoots/${s.id}/trial`, { method: "POST" });
+      $("#dlg").close(); state.current = t.id; show("profiles");
+    }));
+  };
+
   $("#fix-go", form).onclick = async () => {
     const box = $("#fix-result", form), btn = $("#fix-go", form);
     const fd = new FormData();
@@ -436,31 +470,9 @@ async function fixDialog(p) {
     btn.disabled = true;
     box.innerHTML = `<p class="small muted">${me ? "Working it out…" : "The AI is looking at it… (up to a minute without a graphics card)"}</p>`;
     try {
-      const s = await api(`/api/profiles/${p.id}/diagnose`, { method: "POST", body: fd });
-      const d = s.diagnosis;
-      let trial = null;
-      if (form.elements.auto.checked && s.changes.length) trial = await api(`/api/troubleshoots/${s.id}/trial`, { method: "POST" });
-      box.innerHTML = `<h3>What it found</h3>
-        ${d.issues.length ? `<ul class="found">${d.issues.map((i) => `<li><b>${esc(i.title)}</b>
-          ${i.confidence != null ? `<span class="tag">${Math.round(i.confidence * 100)}% sure</span>` : ""}
-          ${i.evidence && d.by === "ai" ? `<div class="small muted">${esc(i.evidence)}</div>` : ""}</li>`).join("")}</ul>`
-          : `<p>No clear problem found. ${esc(d.summary || "")} Try a closer, well-lit photo, or pick the problem yourself.</p>`}
-        ${d.summary && d.issues.length ? `<p class="small">${esc(d.summary)}</p>` : ""}
-        ${s.changes.length ? `<h3>Suggested changes</h3>${changeRows(s.changes)}` : d.issues.length
-          ? `<p class="small">No filament setting changes for this one; see the tips below.</p>` : ""}
-        ${d.issues.some((i) => i.tips?.length) ? `<h3>Tips</h3><ul class="small">${[...new Set(d.issues.flatMap((i) => i.tips || []))]
-          .map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
-        <div class="actions">
-          ${trial ? `<button class="primary" type="button" id="fix-open">Open the trial profile</button>`
-            : s.changes.length ? `<button class="primary" type="button" id="fix-trial">Make a trial profile with these</button>` : ""}
-        </div>
-        ${trial ? `<p class="small muted">Made <b>${esc(trial.name)}</b>. Print with it, then tell it whether it's better.</p>` : ""}`;
-      const open = (id) => { $("#dlg").close(); state.current = id; show("profiles"); };
-      $("#fix-open", form)?.addEventListener("click", () => open(trial.id));
-      $("#fix-trial", form)?.addEventListener("click", guard(async () => {
-        const t = await api(`/api/troubleshoots/${s.id}/trial`, { method: "POST" }); open(t.id);
-      }));
-      if (!trial) renderProfile(p.id);
+      const first = await api(`/api/profiles/${p.id}/diagnose`, { method: "POST", body: fd });
+      drawReview(first);
+      renderProfile(p.id);
     } catch (e) {
       box.innerHTML = `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`;
     } finally { btn.disabled = false; }
@@ -880,9 +892,10 @@ const renderCalTest = guard(async () => {
     try {
       const r = await api(`/api/profiles/${p.id}/calibrations/preview`, { json: { test: t.id, inputs: readInputs() } });
       box.className = "result";
-      box.innerHTML = r.setting
+      box.innerHTML = (r.setting
         ? `New ${esc(label)}: <b>${esc(r.new)}</b> <span class="muted">(was ${esc(r.old ?? "not set")})</span><br><span class="small muted">${esc(r.explanation)}</span>`
-        : esc(r.explanation);
+        : esc(r.explanation)) +
+        (r.extra?._warning ? `<div class="small" style="color:var(--bad);margin-top:6px">⚠ ${esc(r.extra._warning)}</div>` : "");
     } catch (e) { box.className = "result"; box.innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`; }
   };
   let timer;
@@ -1192,6 +1205,9 @@ async function renderAI() {
           ["external", "My own Ollama"]])}</div>
         <div><label>Graphics card</label>${sel("gpu", [["auto", "Detect automatically"], ["nvidia", "NVIDIA"], ["amd", "AMD"], ["cpu", "None / CPU only"]])}</div>
         <div><label>Model</label><input name="model" list="ai-models" value="${esc(s.model)}"></div>
+        <div><label>Context size (photos per request)</label><select name="context">${[[8192, "8k: 1 photo, least memory"],
+          [16384, "16k: up to 4 photos (recommended)"], [32768, "32k: most room, needs ~2 GB more memory"]].map(([v, l]) =>
+          `<option value="${v}" ${Number(s.context || 16384) === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
         <div class="ext"><label>Your Ollama address</label><input name="external_url" value="${esc(s.external_url)}"></div>
       </div>
       <datalist id="ai-models">${MODELS.map(([m, d]) => `<option value="${m}">${esc(d)}</option>`).join("")}</datalist>
@@ -1214,6 +1230,7 @@ async function renderAI() {
   form.onsubmit = guard(async (ev) => {
     ev.preventDefault();
     const body = Object.fromEntries(new FormData(form).entries());
+    if (body.context) body.context = Number(body.context);
     await api("/api/ai/settings", { method: "PUT", json: body });
     toast("Saved");
     pollAI();

@@ -140,3 +140,84 @@ def test_old_database_gets_new_columns(tmp_path):
     db = DB(path)
     assert "trial_of" in {r[1] for r in db.conn.execute("PRAGMA table_info(profiles)")}
     assert db.conn.execute("SELECT name FROM sqlite_master WHERE name='troubleshoots'").fetchone()
+
+
+def test_near_zero_retraction_jumps_to_a_real_value():
+    c = {x["key"]: x for x in ts.plan_changes(["stringing"], {"nozzle_temperature": 195,
+         "nozzle_temperature_range_low": 190, "filament_retraction_length": 0.01})}
+    assert c["filament_retraction_length"]["new"] == 0.6
+    assert "almost zero" in c["filament_retraction_length"]["why"]
+    c = {x["key"]: x for x in ts.plan_changes(["stringing"], {"filament_retraction_length": 0.7})}
+    assert c["filament_retraction_length"]["new"] == 0.9
+
+
+def test_user_words_beat_wrong_ai_guesses():
+    # roughly what the AI said about the silk Benchy
+    ai = [{"id": "sagging_overhangs", "confidence": 0.5, "evidence": "droop"},
+          {"id": "warping", "confidence": 0.4, "evidence": "corner"},
+          {"id": "stringing", "confidence": 0.7, "evidence": "hairs in cabin"}]
+    out = ts.combine(ai, "there are wavy lines on the hull and some strings inside")
+    ids = [i["id"] for i in out]
+    assert ids[0] == "stringing" and out[0]["confidence"] == 1.0
+    assert "vfa" in ids and "warping" not in ids   # added from words; low guess dropped
+    assert len(out) <= 3
+    assert ts.combine([{"id": "warping", "confidence": 0.3, "evidence": ""}], "") == []
+
+
+def test_vfa_suggests_speed_from_your_test():
+    s = ts.process_suggestions(["vfa"], {"vfa_speed": 107.1})
+    assert s[0]["setting"] == "Outer wall speed" and s[0]["value"].startswith("107 mm/s")
+    assert "run the VFA calibration" in ts.process_suggestions(["vfa"])[0]["value"]
+    assert ts.plan_changes(["vfa"], {"nozzle_temperature": 200}) == []
+
+
+def test_diagnose_shrinks_photos_and_combines(client, monkeypatch, tmp_path):
+    import io
+    from PIL import Image
+    pid = _profile(client)["id"]
+    client.post(f"/api/profiles/{pid}/calibrations", data={"test": "vfa", "inputs": json.dumps({"unit": "flow", "flow": "9"})})
+    ai = client.app_ref.state.ai
+    seen = {}
+
+    def chat(messages, schema):
+        import base64
+        imgs = messages[1]["images"]
+        seen["sizes"] = [Image.open(io.BytesIO(base64.b64decode(b))).size for b in imgs]
+        seen["prompt"] = messages[1]["content"]
+        return json.dumps({"issues": [{"id": "sagging_overhangs", "confidence": 0.5, "evidence": "?"},
+                                      {"id": "warping", "confidence": 0.35, "evidence": "?"}], "summary": ""})
+    monkeypatch.setattr(ai, "ready", lambda: True)
+    monkeypatch.setattr(ai, "chat", chat)
+    big = io.BytesIO(); Image.new("RGB", (1126, 2000), (200, 200, 200)).save(big, "JPEG")
+    sess = client.post(f"/api/profiles/{pid}/diagnose", data={"description": "wavy lines on the hull"},
+                       files=[("photos", ("a.jpg", big.getvalue(), "image/jpeg")),
+                              ("photos", ("b.jpg", big.getvalue(), "image/jpeg"))]).json()
+    assert all(max(s) <= 1024 for s in seen["sizes"]) and len(seen["sizes"]) == 2
+    assert seen["prompt"].startswith('What the user says about the print: "wavy lines on the hull"')
+    ids = [i["id"] for i in sess["diagnosis"]["issues"]]
+    assert ids[0] == "vfa" and "warping" not in ids
+    assert sess["diagnosis"]["process"][0]["value"].startswith("107 mm/s")
+
+    # untick the wrong guess, add stringing: suggestions are worked out again
+    r = client.post(f"/api/troubleshoots/{sess['id']}/replan", json={"issues": ["vfa", "stringing"]}).json()
+    assert [i["id"] for i in r["diagnosis"]["issues"]] == ["vfa", "stringing"]
+    assert {c["key"] for c in r["changes"]} == {"nozzle_temperature", "filament_retraction_length"}
+    assert r["diagnosis"]["issues"][1]["title"] == "Stringing / oozing"
+    client.post(f"/api/troubleshoots/{sess['id']}/trial")
+    assert client.post(f"/api/troubleshoots/{sess['id']}/replan", json={"issues": ["vfa"]}).status_code == 400
+
+
+def test_context_setting(client):
+    assert client.put("/api/ai/settings", json={"context": 32768}).json()["settings"]["context"] == 32768
+    assert client.put("/api/ai/settings", json={"context": 999}).status_code == 400
+
+
+def test_shrink_keeps_small_and_bad_images():
+    import io
+    from PIL import Image
+    from forge.ai import images
+    small = io.BytesIO(); Image.new("RGB", (300, 200)).save(small, "PNG")
+    out = Image.open(io.BytesIO(images.shrink(small.getvalue())))
+    assert out.size == (300, 200)
+    assert images.shrink(b"not an image") == b"not an image"
+    assert images.token_estimate(small.getvalue()) < 100

@@ -288,6 +288,10 @@ def compute(test: str, inputs: dict, current: dict) -> dict:
         start, step, height = num("start", 0), num("step", 0.1), num("height")
         new = round(start + height * step, 2)
         why = f"{start:g} + {height:g} mm × {step:g} = {new} mm"
+        if new < 0.2:
+            extra["_warning"] = (f"{new} mm is almost no retraction and will string a lot. Did you put the retraction "
+                                 "length into the height box? Height is the measured mm from the bottom of the print "
+                                 "to where the strings stop (e.g. 7).")
     elif test == "max_flow":
         start, step, height = num("start", 5), num("step", 0.5), num("height")
         margin = num("margin", 10)
@@ -311,6 +315,7 @@ def compute(test: str, inputs: dict, current: dict) -> dict:
             if not 0 < speed <= 2000:
                 raise ValueError("That speed looks wrong; enter it in mm/s.")
             why = f"Cleanest walls at {speed:g} mm/s (logged only)."
+        extra["_speed"] = round(speed, 1)
     else:  # pragma: no cover
         raise ValueError(test)
 
