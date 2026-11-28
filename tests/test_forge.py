@@ -418,3 +418,21 @@ def test_vlottizff_bundle_matches_orca_format(client):
 
 def test_bundle_with_no_profiles(client):
     assert client.get("/api/export-bundle").status_code == 400
+
+
+@pytest.mark.parametrize("inputs,expect", [
+    ({"unit": "speed", "best_speed": "110"}, "110 mm/s"),
+    ({"best_speed": "120"}, "120 mm/s"),                                    # older entries without a unit
+    ({"unit": "flow", "flow": "9"}, "107 mm/s"),                            # default 0.2 × 0.42
+    ({"unit": "flow", "flow": "9,5", "layer_height": "0.16", "line_width": "0.45"}, "132 mm/s"),
+])
+def test_vfa_speed_or_flow(inputs, expect):
+    r = calibration.compute("vfa", inputs, {})
+    assert r["new"] is None and r["setting"] is None and expect in r["explanation"]
+
+
+def test_vfa_rejects_bad_values():
+    with pytest.raises(ValueError):
+        calibration.compute("vfa", {"unit": "flow", "flow": "9", "layer_height": "0"}, {})
+    with pytest.raises(ValueError, match="Fill in"):
+        calibration.compute("vfa", {"unit": "flow"}, {})
