@@ -199,6 +199,7 @@ HTTPServer((host, int(port)), H).serve_forever()
 '''
 
 
+@pytest.mark.skipif(__import__("os").name == "nt", reason="the fake Ollama is a shebang script")
 def test_manager_lifecycle_with_fake_ollama(tmp_path):
     import socket
     import sys

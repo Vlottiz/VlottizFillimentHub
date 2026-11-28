@@ -379,7 +379,9 @@ def test_install_into_logged_in_folder(client, tmp_path):
     raw = (FIXTURES / "Giantarm PLA Silk Silver @Snapmaker U1.json").read_bytes()
     pid = client.post("/api/orca/import-file", files=[("files", ("g.json", raw))]).json()["results"][0]["profile_id"]
     meta = client.get("/api/meta").json()
-    assert meta["orca_active_dir"].endswith("uuid-123/filament") and meta["orca_filament_dirs"][0] == meta["orca_active_dir"]
+    from pathlib import Path as _P
+    assert _P(meta["orca_active_dir"]).parts[-2:] == ("uuid-123", "filament")
+    assert meta["orca_filament_dirs"][0] == meta["orca_active_dir"]
     r = client.post(f"/api/profiles/{pid}/install", json={"target_dir": meta["orca_active_dir"]})
     assert r.status_code == 200
     written = json.loads((orca_root / "user" / "uuid-123" / "filament" /
@@ -501,3 +503,24 @@ def test_old_files_without_tag_still_import(client):
     r = client.post("/api/orca/import-file", files=[("files", ("g.json", raw))]).json()
     p = client.get(f"/api/profiles/{r['results'][0]['profile_id']}").json()
     assert set(p["sources"].values()) == {"imported"}
+
+
+def test_data_dir_is_outside_the_app_and_old_data_moves(tmp_path, monkeypatch):
+    from forge import paths
+    monkeypatch.delenv("FORGE_DATA_DIR", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    d = paths.default_data_dir()
+    assert paths.app_dir() not in d.parents
+    old, new = tmp_path / "app" / "data", tmp_path / "new"
+    (old / "ollama" / "models").mkdir(parents=True)
+    (old / "forge.db").write_text("db")
+    (old / "ollama" / "models" / "blob").write_text("model")
+    assert sorted(paths.migrate_old_data(old, new)) == ["forge.db", "ollama"]
+    assert (new / "ollama" / "models" / "blob").read_text() == "model" and not (old / "forge.db").exists()
+    # never overwrites an existing database
+    (old / "forge.db").write_text("older")
+    assert paths.migrate_old_data(old, new) == []
+    assert (new / "forge.db").read_text() == "db"
+    monkeypatch.setenv("FORGE_DATA_DIR", str(tmp_path / "custom"))
+    assert paths.default_data_dir() == tmp_path / "custom"
