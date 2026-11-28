@@ -77,6 +77,10 @@ Click **Download VlottizFF bundle for Orca** on the Profiles page (or in **Orca 
 
 To update, download a new bundle and import it the same way: it has the same id, so it replaces the old one. Orca treats bundle presets as read-only; make changes in this app and re-import.
 
+## Walls
+
+Each profile has a **Walls** section: outer and inner wall speed, outer wall acceleration, number of walls, and a note. Orca applies these from its **print settings** (not the filament preset), so set them there when you print with this filament; the app keeps them per filament, writes them into the filament's Notes in Orca, and warns when a wall speed needs more plastic than this filament can melt (its max volumetric speed). Your **VFA** calibration fills in the outer wall speed, and **Fix a print problem → Rough / uneven walls** can try slower walls in a trial profile.
+
 ## Fixing print problems
 
 On a profile, click **Fix a print problem**. Add a photo and a sentence or two (or pick the problem from the list yourself).

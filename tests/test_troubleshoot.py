@@ -122,7 +122,7 @@ def test_diagnose_errors(client):
     assert client.post(f"/api/profiles/{pid}/diagnose", data={"description": "help"}).status_code == 409  # AI off
     assert client.post(f"/api/profiles/{pid}/diagnose", data={"use_ai": "false"}).status_code == 400
     assert client.post(f"/api/profiles/{pid}/diagnose", data={"issues": "ringing", "use_ai": "false"}).json()["changes"] == []
-    sid = client.post(f"/api/profiles/{pid}/diagnose", data={"issues": "ringing", "use_ai": "false"}).json()["id"]
+    sid = client.post(f"/api/profiles/{pid}/diagnose", data={"issues": "z_banding", "use_ai": "false"}).json()["id"]
     assert client.post(f"/api/troubleshoots/{sid}/trial").status_code == 400
     assert client.post(f"/api/profiles/{pid}/trial/result", json={"result": "better"}).status_code == 400
     r = client.post(f"/api/profiles/{pid}/diagnose", data={"issues": "warping", "use_ai": "false"},
@@ -221,3 +221,61 @@ def test_shrink_keeps_small_and_bad_images():
     assert out.size == (300, 200)
     assert images.shrink(b"not an image") == b"not an image"
     assert images.token_estimate(small.getvalue()) < 100
+
+
+def test_walls_section_vfa_and_flow_check(client):
+    p = _profile(client)
+    pid = p["id"]
+    assert p["walls"] == {"values": {}, "sources": {}, "note": ""}
+    # VFA test sets the outer wall speed
+    client.post(f"/api/profiles/{pid}/calibrations", data={"test": "vfa", "inputs": json.dumps({"unit": "flow", "flow": "9"})})
+    p = client.get(f"/api/profiles/{pid}").json()
+    assert p["walls"]["values"]["outer_wall_speed"] == 107.1 and p["walls"]["sources"]["outer_wall_speed"] == "vfa"
+    # "not sure" VFA results don't change walls
+    client.post(f"/api/profiles/{pid}/calibrations", data={"test": "vfa", "apply": "false",
+                                                           "inputs": json.dumps({"best_speed": "300"})})
+    assert client.get(f"/api/profiles/{pid}").json()["walls"]["values"]["outer_wall_speed"] == 107.1
+
+    p = client.put(f"/api/profiles/{pid}/walls", json={"values": {"inner_wall_speed": "300", "wall_loops": 3},
+                                                       "note": "silk: keep walls slow"}).json()
+    assert p["walls"]["values"] == {"outer_wall_speed": 107.1, "inner_wall_speed": 300, "wall_loops": 3}
+    assert p["walls"]["sources"]["inner_wall_speed"] == "manual"
+    check = {c["key"]: c for c in p["wall_check"]}
+    assert check["outer_wall_speed"]["ok"] and not check["inner_wall_speed"]["ok"]   # 300 mm/s > PLA's 18 mm³/s
+    assert "slow it to about" in check["inner_wall_speed"]["message"]
+    assert client.put(f"/api/profiles/{pid}/walls", json={"values": {"wall_loops": 99}}).status_code == 400
+    assert client.put(f"/api/profiles/{pid}/walls", json={"values": {"nozzle": 1}}).status_code == 400
+
+    # shown in Orca's Notes, and read back on import
+    preset = client.get(f"/api/profiles/{pid}/preview").json()
+    notes = preset["filament_notes"][0]
+    assert "Walls (set these in Orca's print settings): outer wall speed 107.1 mm/s" in notes
+    assert "[ffw:outer_wall_speed=107.1;inner_wall_speed=300;wall_loops=3]" in notes
+    assert "outer_wall_speed" not in preset   # never put into the filament preset itself
+    client.delete(f"/api/profiles/{pid}")
+    r = client.post("/api/orca/import-file", files=[("files", ("p.json", json.dumps(preset).encode()))]).json()
+    q = client.get(f"/api/profiles/{r['results'][0]['profile_id']}").json()
+    assert q["walls"]["values"] == {"outer_wall_speed": 107.1, "inner_wall_speed": 300, "wall_loops": 3}
+    assert q["walls"]["sources"]["outer_wall_speed"] == "imported"
+    # clearing a value
+    q = client.put(f"/api/profiles/{q['id']}/walls", json={"values": {"inner_wall_speed": None}}).json()
+    assert "inner_wall_speed" not in q["walls"]["values"]
+
+
+def test_rough_walls_trial_carries_wall_speeds(client):
+    pid = _profile(client, nozzle_min=190, nozzle_max=220)["id"]
+    sess = client.post(f"/api/profiles/{pid}/diagnose", data={"issues": "rough_walls", "use_ai": "false"}).json()
+    assert {c["key"] for c in sess["changes"]} == {"nozzle_temperature", "filament_max_volumetric_speed"}
+    proc = {x["key"]: x["number"] for x in sess["diagnosis"]["process"]}
+    assert proc == {"outer_wall_speed": 70, "inner_wall_speed": 90}
+    t = client.post(f"/api/troubleshoots/{sess['id']}/trial").json()
+    assert t["walls"]["values"] == {"outer_wall_speed": 70, "inner_wall_speed": 90}
+    assert t["walls"]["sources"]["outer_wall_speed"] == "fix"
+    o = client.post(f"/api/profiles/{t['id']}/trial/result", json={"result": "better"}).json()
+    assert o["walls"]["values"] == {"outer_wall_speed": 70, "inner_wall_speed": 90}
+    assert o["walls"]["sources"]["inner_wall_speed"] == "tested"
+
+
+def test_rough_walls_from_words():
+    assert "rough_walls" in ts.keyword_issues("the walls are lumpy but top and bottom feel good")
+    assert "rough_walls" in ts.keyword_issues("rough uneven walls")

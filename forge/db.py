@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS orca_snapshots (
 );
 """
 
-JSON_COLS = {"data", "spec", "settings", "sources", "notes", "inputs", "photos", "diagnosis", "changes"}
+JSON_COLS = {"data", "spec", "settings", "sources", "notes", "inputs", "photos", "diagnosis", "changes", "walls"}
 
 
 class DB:
@@ -100,6 +100,8 @@ class DB:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(profiles)")}
         if "trial_of" not in cols:
             self.conn.execute("ALTER TABLE profiles ADD COLUMN trial_of INTEGER")
+        if "walls" not in cols:
+            self.conn.execute("ALTER TABLE profiles ADD COLUMN walls TEXT NOT NULL DEFAULT '{}'")
         self.conn.commit()
 
     # -- generic helpers -------------------------------------------------

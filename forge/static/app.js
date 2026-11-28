@@ -431,6 +431,8 @@ function trialBanner(p) {
     <b>Trial profile</b>: a copy of <button class="link" data-open-profile="${orig?.id}">${esc(orig?.name || "the original")}</button>
     with these changes${s?.diagnosis?.issues?.length ? ` to fix <b>${esc(s.diagnosis.issues.map((i) => i.title || i.id).join(", "))}</b>` : ""}:
     ${s?.changes?.length ? changeRows(s.changes) : ""}
+    ${s?.diagnosis?.process?.some((x) => x.key) ? `<p class="small" style="margin:6px 0 0"><b>Walls for this trial</b> (set them in Orca's
+      print settings too): ${s.diagnosis.process.filter((x) => x.key).map((x) => `${esc(x.setting)} <b>${esc(x.number)}</b>`).join(", ")}</p>` : ""}
     <ol class="small"><li>Export or install it (or download the bundle) and print the same model again.</li>
       <li>Compare the two prints, then:</li></ol>
     <div class="actions">
@@ -486,10 +488,11 @@ async function fixDialog(p) {
       ${s.changes.length ? `<h3>Filament changes (for the trial profile)</h3>${changeRows(s.changes)}` : d.issues.length
         ? `<p class="small">No filament setting changes for this; see the print settings and tips below.</p>` : ""}
       ${d.process?.length ? `<h3>Change in Orca's print (process) settings</h3><table class="settings changes">${d.process.map((x) => `<tr>
-        <td><b>${esc(x.setting)}</b><div class="small muted">${esc(x.why)}</div></td><td><b>${esc(x.value)}</b></td></tr>`).join("")}</table>` : ""}
+        <td><b>${esc(x.setting)}</b><div class="small muted">${esc(x.why)}</div></td><td><b>${esc(x.value)}</b>
+        ${x.key ? `<div class="small muted">${x.current != null ? `now ${esc(x.current)} · ` : ""}saved in the trial's Walls</div>` : ""}</td></tr>`).join("")}</table>` : ""}
       ${d.issues.some((i) => i.tips?.length) ? `<h3>Tips</h3><ul class="small">${[...new Set(d.issues.flatMap((i) => i.tips || []))]
         .map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
-      <div class="actions">${s.changes.length ? `<button class="primary" type="button" id="fix-trial">Make a trial profile with these changes</button>` : ""}</div>
+      <div class="actions">${s.changes.length || d.process?.some((x) => x.key) ? `<button class="primary" type="button" id="fix-trial">Make a trial profile with these changes</button>` : ""}</div>
       <p class="small muted">The trial is a copy; your original profile isn't touched until you say the trial printed better.</p>`;
     $("#fix-replan", form).onclick = guard(async () => {
       const keep = [...form.querySelectorAll("input[name=keep]:checked")].map((c) => c.value);
@@ -528,6 +531,46 @@ async function fixDialog(p) {
       box.innerHTML = `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`;
     } finally { btn.disabled = false; }
   };
+}
+
+const WALL_SRC = { manual: ["You set", "manual"], vfa: ["VFA test", "calibrated"], fix: ["Trial", "imported"],
+  tested: ["Proven in a print", "tested"], imported: ["Imported", "imported"] };
+
+function wallsCard(p) {
+  const w = p.walls || { values: {}, sources: {}, note: "" };
+  const check = Object.fromEntries((p.wall_check || []).map((c) => [c.key, c]));
+  const rows = state.meta.wall_fields.map((f) => {
+    const v = w.values[f.key], src = WALL_SRC[w.sources[f.key]], c = check[f.key];
+    return `<tr><td>${esc(f.label)} ${f.unit ? `<span class="muted small">(${esc(f.unit)})</span>` : ""}
+        <div class="small muted">Orca: ${esc(f.where)}</div></td>
+      <td><input data-wall="${esc(f.key)}" type="text" inputmode="decimal" value="${esc(v ?? "")}" data-orig="${esc(v ?? "")}"
+        placeholder="not set"></td>
+      <td>${src ? `<span class="src ${src[1]}">${esc(src[0])}</span>` : ""}</td>
+      <td class="small">${c ? (c.ok ? `<span style="color:var(--good)">✓ needs ${c.needs} of ${c.max ?? "?"} mm³/s</span>`
+        : `<span style="color:var(--bad)">⚠ ${esc(c.message)}</span>`) : ""}</td></tr>`;
+  }).join("");
+  return `<h2>Walls</h2>
+    <div class="card walls-card">
+      <p class="small muted" style="margin-top:0">What to use for this filament's walls. Orca applies these from its <b>print settings</b>
+        (not the filament preset), so set them there when you print with this filament. They're also written into the filament's
+        Notes in Orca so you can see them. Your VFA test fills in the outer wall speed.</p>
+      <table class="walls-table">${rows}</table>
+      <label style="margin-top:8px">Wall notes</label>
+      <input data-wall-note value="${esc(w.note || "")}" placeholder="e.g. silk: walls slow and steady">
+      <div class="actions"><button type="button" id="pf-walls-save">Save walls</button></div>
+    </div>`;
+}
+
+function wireWalls(p, el) {
+  const btn = $("#pf-walls-save", el);
+  if (!btn) return;
+  btn.onclick = guard(async () => {
+    const values = {};
+    $$("input[data-wall]", el).forEach((i) => { if (i.value.trim() !== i.dataset.orig) values[i.dataset.wall] = i.value.trim() || null; });
+    await api(`/api/profiles/${p.id}/walls`, { method: "PUT", json: { values, note: $("input[data-wall-note]", el).value } });
+    toast("Walls saved");
+    renderProfile(p.id);
+  });
 }
 
 function todoPanel(p) {
@@ -675,6 +718,8 @@ const renderProfile = guard(async (id) => {
       <div><span class="muted small">Limited by</span><b>${esc(sp.limited_by || "?")}</b></div>
     </div>
 
+    ${wallsCard(p)}
+
     ${p.notes?.length ? `<div class="notes"><ul style="margin:0;padding-left:18px">${p.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></div>` : ""}
 
     ${groups.map((g) => {
@@ -732,6 +777,7 @@ const renderProfile = guard(async (id) => {
     loadProfiles();
   });
   $("#pf-qr").onclick = () => qrDialog(p);
+  wireWalls(p, el);
   $("#pf-fix").onclick = () => fixDialog(p);
   $$("[data-trial]", el).forEach((b) => (b.onclick = guard(async () => {
     const result = b.dataset.trial;
