@@ -66,7 +66,7 @@ Importing a preset that's already in the app updates that profile (with a histor
 
 ## Adding presets to OrcaSlicer
 
-- **From the app:** open the profile and click **Install into Orca**, then restart Orca.
+- **From the app (most reliable):** open the profile and click **Install into Orca**, then restart Orca. The profile shows whether it's in Orca and up to date; installing again updates it in place, never a second copy (older copies under its old name or from an imported bundle are removed). **Remove from Orca** takes it out again. Anything replaced or removed is backed up in **Orca & backup → Snapshots** first.
 - **By hand:** in Orca, **File → Import → Import Configs…** and pick the `.json` file.
 
 Then pick it in the filament dropdown in the Prepare tab; it's under the user presets. If it isn't listed, make sure the Snapmaker U1 is the selected printer.

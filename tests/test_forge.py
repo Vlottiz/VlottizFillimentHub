@@ -530,3 +530,73 @@ def test_retraction_warns_when_almost_zero():
     r = calibration.compute("retraction", {"start": "0", "step": "0.1", "height": "0.1"}, {})
     assert r["new"] == 0.01 and "height box" in r["extra"]["_warning"]
     assert "_warning" not in calibration.compute("retraction", {"height": "7"}, {})["extra"]
+
+
+def _orca_tree(tmp_path):
+    root = tmp_path / "orca"
+    acct = root / "user" / "default"
+    (acct / "filament").mkdir(parents=True, exist_ok=True)
+    return root, acct
+
+
+def test_install_keeps_exactly_one_copy_and_remove(client, tmp_path):
+    root, acct = _orca_tree(tmp_path)
+    raw = (FIXTURES / "Giantarm PLA Silk Silver @Snapmaker U1.json").read_bytes()
+    pid = client.post("/api/orca/import-file", files=[("files", ("g.json", raw))]).json()["results"][0]["profile_id"]
+    target = str(acct / "filament")
+
+    # leftovers from before: an old unprefixed user preset and a copy inside an imported bundle
+    (acct / "filament" / "Giantarm PLA Silk Silver @Snapmaker U1.json").write_bytes(raw)
+    bundle = acct / "_local" / "vlottizff"
+    (bundle / "filament").mkdir(parents=True)
+    (bundle / "filament" / "Giantarm PLA Silk Silver @Snapmaker U1.json").write_bytes(raw)
+    (bundle / "bundle_metadata.json").write_text(json.dumps(
+        {"id": "vlottizff", "name": "VlottizFF", "filament_presets": ["Giantarm PLA Silk Silver @Snapmaker U1.json", "Other.json"]}))
+    # a copy in another Orca account must be left alone by install
+    other = root / "user" / "uuid-9" / "filament"
+    other.mkdir(parents=True)
+    (other / "Giantarm PLA Silk Silver @Snapmaker U1.json").write_bytes(raw)
+
+    st = client.get(f"/api/profiles/{pid}/orca-status").json()
+    assert st["installed"] and len(st["copies"]) == 3 and not st["up_to_date"]
+
+    r = client.post(f"/api/profiles/{pid}/install", json={"target_dir": target}).json()
+    assert r["status"] == "installed" and len(r["removed"]) == 2
+    files = sorted(p.name for p in (acct / "filament").glob("*.json"))
+    assert files == ["VlottizFF Giantarm PLA Silk Silver @Snapmaker U1.json"]
+    assert not list((bundle / "filament").glob("*.json"))
+    assert json.loads((bundle / "bundle_metadata.json").read_text())["filament_presets"] == ["Other.json"]
+    assert (other / "Giantarm PLA Silk Silver @Snapmaker U1.json").exists()
+    snaps = client.get("/api/orca/scan").json()["snapshots"]
+    assert len(snaps) >= 2  # the removed files were backed up first
+
+    # installing again: nothing to do
+    r = client.post(f"/api/profiles/{pid}/install", json={"target_dir": target}).json()
+    assert r["status"] == "up_to_date" and r["removed"] == []
+    assert client.get(f"/api/profiles/{pid}/orca-status").json()["copies"][0]["up_to_date"] is True
+
+    # change the profile: status says it's out of date, install updates in place
+    client.put(f"/api/profiles/{pid}", json={"settings": {"filament_retraction_length": 0.8}})
+    st = client.get(f"/api/profiles/{pid}/orca-status").json()
+    assert [c["up_to_date"] for c in st["copies"] if c["account"] == "default"] == [False]
+    r = client.post(f"/api/profiles/{pid}/install", json={"target_dir": target}).json()
+    assert r["status"] == "updated"
+    assert len(list((acct / "filament").glob("*.json"))) == 1
+
+    # remove from Orca: every copy, in every account
+    r = client.post(f"/api/profiles/{pid}/uninstall").json()
+    assert len(r["removed"]) == 2
+    assert not list((acct / "filament").glob("*.json")) and not list(other.glob("*.json"))
+    assert not list((acct / "filament").glob("*.info"))
+    assert client.get(f"/api/profiles/{pid}/orca-status").json()["installed"] is False
+    assert client.post(f"/api/profiles/{pid}/uninstall").json()["removed"] == []
+
+
+def test_other_presets_are_never_touched(client, tmp_path):
+    root, acct = _orca_tree(tmp_path)
+    (acct / "filament" / "Someone Else PLA.json").write_text(json.dumps({"type": "filament", "name": "Someone Else PLA"}))
+    raw = (FIXTURES / "Giantarm PLA Silk Silver @Snapmaker U1.json").read_bytes()
+    pid = client.post("/api/orca/import-file", files=[("files", ("g.json", raw))]).json()["results"][0]["profile_id"]
+    client.post(f"/api/profiles/{pid}/install", json={"target_dir": str(acct / "filament")})
+    client.post(f"/api/profiles/{pid}/uninstall")
+    assert (acct / "filament" / "Someone Else PLA.json").exists()

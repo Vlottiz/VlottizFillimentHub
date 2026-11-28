@@ -597,17 +597,79 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
     class InstallIn(BaseModel):
         target_dir: str
 
+    def _orca_copies(p: dict) -> list[dict]:
+        return orca.find_copies(orca.name_variants(p["name"], orca_group()))
+
+    def _snapshot_file(path: str, name: str) -> None:
+        """Keep a copy in Orca snapshots before the app changes or removes an Orca file."""
+        try:
+            content = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return
+        last = db.one("SELECT content FROM orca_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1", (path,))
+        if not last or last["content"] != content:
+            db.insert("orca_snapshots", {"path": path, "name": name, "content": content})
+
+    @app.get("/api/profiles/{pid}/orca-status")
+    def orca_status(pid: int):
+        """Is this profile in Orca, and is that copy the same as the profile now?"""
+        p = get_profile(pid)
+        want = preset_for(p)
+        copies = [{"path": c["path"], "name": c["name"], "kind": c["kind"], "account": c["account"],
+                   "up_to_date": c["content"] == want} for c in _orca_copies(p)]
+        return {"copies": copies, "installed": bool(copies),
+                "up_to_date": any(c["up_to_date"] and c["kind"] == "user" for c in copies) and len(copies) == 1,
+                "orca_running": orca.orca_running()}
+
     @app.post("/api/profiles/{pid}/install")
     def install_profile(pid: int, body: InstallIn):
+        """Install (or update) this profile in Orca, keeping exactly one copy there.
+
+        Older copies of the same profile (e.g. under its name before the group
+        prefix, or from an imported bundle) are backed up to the Orca snapshots
+        and removed, so it never shows up twice.
+        """
         allowed = {str(d) for d in orca.install_dirs()}
         if body.target_dir not in allowed:
             raise HTTPException(400, "That folder isn't an OrcaSlicer user filament folder.")
         p = get_profile(pid)
         preset = preset_for(p)
+        target = Path(body.target_dir) / (orca.safe_filename(preset["name"]) + ".json")
+        account = Path(body.target_dir).parent.name
+        copies = [c for c in _orca_copies(p) if c["account"] == account]  # other Orca accounts are left alone
+        if len(copies) == 1 and Path(copies[0]["path"]) == target and copies[0]["content"] == preset:
+            return {"path": str(target), "status": "up_to_date", "removed": [],
+                    "message": "Already in Orca and up to date. Nothing to do."}
+        removed = []
+        for c in copies:
+            _snapshot_file(c["path"], c["name"])
+            if Path(c["path"]) != target:
+                orca.remove_copy(Path(c["path"]))
+                removed.append({"name": c["name"], "kind": c["kind"], "path": c["path"]})
+        updated = target.exists()
         path = orca.install(preset, Path(body.target_dir))
         db.insert("exports", {"profile_id": pid, "preset_name": p["name"],
                               "content": json.dumps(preset, indent=4), "target": str(path)})
-        return {"path": str(path), "message": "Installed. Restart OrcaSlicer to see it."}
+        msg = ("Updated in Orca." if updated else "Installed.") + \
+            (f" Removed {len(removed)} older cop{'y' if len(removed) == 1 else 'ies'}." if removed else "") + \
+            (" Restart OrcaSlicer to see it." if orca.orca_running() else " It shows up next time you open Orca.")
+        return {"path": str(path), "status": "updated" if updated else "installed", "removed": removed, "message": msg}
+
+    @app.post("/api/profiles/{pid}/uninstall")
+    def uninstall_profile(pid: int):
+        """Remove this profile from Orca (every copy). Each file is backed up to the Orca snapshots first."""
+        p = get_profile(pid)
+        removed = []
+        for c in _orca_copies(p):
+            _snapshot_file(c["path"], c["name"])
+            orca.remove_copy(Path(c["path"]))
+            removed.append({"name": c["name"], "kind": c["kind"], "path": c["path"]})
+        if not removed:
+            return {"removed": [], "message": "It isn't in Orca."}
+        db.insert("exports", {"profile_id": pid, "preset_name": p["name"], "content": "",
+                              "target": "removed from Orca"})
+        return {"removed": removed, "message": f"Removed from Orca ({len(removed)} file{'s' if len(removed) > 1 else ''}; "
+                "backed up in Orca snapshots)." + (" Restart OrcaSlicer." if orca.orca_running() else "")}
 
     @app.get("/api/export-bundle")
     def export_bundle():

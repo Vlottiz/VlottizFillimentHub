@@ -401,3 +401,82 @@ def notes_for(settings: dict, sources: dict, calibrations: list[dict] | None = N
         lines.append("Proven in a print: " + ", ".join(tested))
     lines.append(f"[ff1:{sources_code(settings, sources)}]")
     return "\n".join(lines)
+
+
+# ------------------------------------------- finding & removing our presets
+def preset_dirs(root: Path | None = None) -> list[tuple[str, Path]]:
+    """Every folder Orca loads filament presets from: user presets and imported bundles."""
+    root = root or config_dir()
+    if not root:
+        return []
+    user = root / "user"
+    if not user.is_dir():
+        return []
+    out = []
+    for acct in sorted(p for p in user.iterdir() if p.is_dir()):
+        if (acct / "filament").is_dir():
+            out.append(("user", acct / "filament"))
+        for kind, sub in (("bundle", "_local"), ("bundle", "_subscribed")):
+            base = acct / sub
+            if base.is_dir():
+                for b in sorted(p for p in base.iterdir() if (p / "filament").is_dir()):
+                    out.append((kind, b / "filament"))
+    return out
+
+
+def name_variants(profile_name: str, group: dict | None) -> set[str]:
+    """Names this profile may have in Orca: with and without your group prefix."""
+    plain = strip_group(profile_name, group)
+    names = {plain, group_name(plain, group)}
+    g = (group or {}).get("name", "").strip()
+    if g:
+        names.add(f"{g} {plain}")
+    return {n.lower() for n in names if n}
+
+
+def find_copies(names: set[str], root: Path | None = None) -> list[dict]:
+    """Preset files in Orca whose name is one of `names` (case-insensitive)."""
+    found = []
+    for kind, d in preset_dirs(root):
+        for f in sorted(d.glob("*.json")):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            name = str(data.get("name") or f.stem)
+            if name.lower() in names or f.stem.lower() in {safe_filename(n).lower() for n in names}:
+                found.append({"path": str(f), "name": name, "kind": kind, "account": d.parents[2].name
+                              if kind == "bundle" else d.parent.name, "content": data})
+    return found
+
+
+def remove_copy(path: Path) -> None:
+    """Delete a preset (and its .info); for bundles also drop it from the bundle's list."""
+    path = Path(path)
+    path.unlink(missing_ok=True)
+    path.with_suffix(".info").unlink(missing_ok=True)
+    meta = path.parent.parent / "bundle_metadata.json"
+    if path.parent.name == "filament" and meta.is_file():
+        try:
+            m = json.loads(meta.read_text(encoding="utf-8"))
+            if isinstance(m.get("filament_presets"), list):
+                m["filament_presets"] = [x for x in m["filament_presets"] if x != path.name]
+                meta.write_text(json.dumps(m, indent=4), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+
+def orca_running() -> bool:
+    """Best effort: is OrcaSlicer open right now? (It only reads presets when it starts.)"""
+    import subprocess
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=5,
+                                 creationflags=0x08000000).stdout
+        else:
+            out = subprocess.run(["ps", "-A", "-o", "comm="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "orca-slicer" in out.lower() or "orcaslicer" in out.lower()

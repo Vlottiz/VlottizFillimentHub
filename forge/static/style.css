@@ -171,3 +171,8 @@ input.ai-unverified, select.ai-unverified { box-shadow: 0 0 0 2px var(--warn); }
 
 .scan-wrap video { width: 100%; max-height: 360px; background: #000; border-radius: 8px; display: block; }
 .scan-wrap video:not([src]):not([srcObject]) { min-height: 0; }
+
+.orca-status.ok { color: var(--good); }
+.orca-status.stale { color: var(--warn); }
+
+[hidden] { display: none !important; }

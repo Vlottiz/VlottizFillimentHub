@@ -638,7 +638,8 @@ const renderProfile = guard(async (id) => {
       <div class="gauge" style="--v:${conf.overall};--gc:${gaugeColour(conf.overall)}"><span>${conf.overall}%</span></div>
       <div style="flex:1;min-width:240px">
         <input id="pf-name" value="${esc(p.name)}" style="font-size:18px;font-weight:600">
-        <div class="small muted" style="margin-top:4px">In Orca: <b>${esc(p.orca_name)}</b></div>
+        <div class="small muted" style="margin-top:4px">In Orca: <b>${esc(p.orca_name)}</b>
+          <span id="pf-orca-status" class="orca-status"></span></div>
         <div class="row two" style="margin-top:8px">
           <div><label>Printer</label><select id="pf-printer">${printerOptions(p.printer_id)}</select></div>
           <div><label>Orca parent preset</label><input id="pf-inherits" value="${esc(p.inherits || "")}"
@@ -653,6 +654,7 @@ const renderProfile = guard(async (id) => {
       <button class="primary" id="pf-save">Save changes</button>
       <a class="btn" href="/api/profiles/${p.id}/export">Export .json for Orca</a>
       <button id="pf-install">Install into Orca</button>
+      <button id="pf-uninstall" hidden>Remove from Orca</button>
       <button id="pf-cal">Calibrate</button>
       <button id="pf-rebuild" title="Recalculate from material, specs and printer. Your edits and calibrations are kept.">Rebuild</button>
       <button id="pf-fix">Fix a print problem</button>
@@ -719,7 +721,11 @@ const renderProfile = guard(async (id) => {
     loadProfiles();
   });
   $("#pf-del").onclick = guard(async () => {
-    if (!confirm(`Delete profile "${p.name}"? (Exports already in Orca are not touched.)`)) return;
+    if (!confirm(`Delete profile "${p.name}" from this app?`)) return;
+    const st = await api(`/api/profiles/${p.id}/orca-status`).catch(() => null);
+    if (st?.installed && confirm("It's also installed in Orca. Remove it from Orca too? (OK = remove, Cancel = leave it in Orca)")) {
+      await api(`/api/profiles/${p.id}/uninstall`, { method: "POST" });
+    }
     await api(`/api/profiles/${p.id}`, { method: "DELETE" });
     state.current = null;
     $("#profile-detail").innerHTML = `<p class="muted">Deleted.</p>`;
@@ -754,6 +760,13 @@ const renderProfile = guard(async (id) => {
       <div class="actions"><button value="cancel">Close</button></div>`, () => {});
   });
   $("#pf-install").onclick = () => installDialog(p);
+  $("#pf-uninstall").onclick = guard(async () => {
+    if (!confirm(`Remove "${p.orca_name || p.name}" from Orca? It stays in this app, and the Orca file is backed up in Orca snapshots.`)) return;
+    const r = await api(`/api/profiles/${p.id}/uninstall`, { method: "POST" });
+    toast(r.message);
+    showOrcaStatus(p);
+  });
+  showOrcaStatus(p);
   $("#pf-cal").onclick = () => { state.calProfile = p.id; show("calibrate"); };
   $$("[data-restore]", el).forEach((b) => (b.onclick = guard(async () => {
     await api(`/api/profiles/${p.id}/restore/${b.dataset.restore}`, { method: "POST" });
@@ -803,6 +816,23 @@ function calCard(c) {
   </div>`;
 }
 
+async function showOrcaStatus(p) {
+  const box = $("#pf-orca-status"), btn = $("#pf-install"), rm = $("#pf-uninstall");
+  if (!box) return;
+  let st;
+  try { st = await api(`/api/profiles/${p.id}/orca-status`); } catch { return; }
+  if (!$("#pf-orca-status") || state.current !== p.id) return;  // moved on to another profile
+  const n = st.copies.length;
+  box.className = "orca-status " + (!n ? "none" : st.up_to_date ? "ok" : "stale");
+  box.textContent = !n ? "· not installed"
+    : st.up_to_date ? "· ✓ installed, up to date"
+    : n > 1 ? `· in Orca ${n} times (Install will tidy it up)`
+    : "· installed, but changed since: update it";
+  btn.textContent = !n ? "Install into Orca" : st.up_to_date ? "✓ In Orca" : "Update in Orca";
+  rm.hidden = !n;
+  if (st.orca_running && n && !st.up_to_date) box.textContent += " (Orca is open: restart it after)";
+}
+
 function installDialog(p) {
   const dirs = state.meta.orca_filament_dirs;
   if (!dirs.length) {
@@ -814,8 +844,9 @@ function installDialog(p) {
     return;
   }
   openDialog(`<h2>Install into Orca</h2>
-    <p>Writes <b>${esc(p.orca_name || p.name)}</b> into Orca's user filament folder. If a preset with this name already exists it is replaced
-    (the old one is in your Orca snapshot if you took one).</p>
+    <p>Writes <b>${esc(p.orca_name || p.name)}</b> into Orca's user filament folder. If this profile is already in Orca it's
+    updated in place, and any older copies of it (e.g. under its old name, or from an imported bundle) are removed, so it never shows
+    up twice. Anything the app replaces or removes is backed up in <b>Orca &amp; backup → Snapshots</b> first.</p>
     <label>Orca account folder</label>
     <select name="dir">${dirs.map((d) => `<option value="${esc(d)}" ${d === state.meta.orca_active_dir ? "selected" : ""}>${esc(d)}${
       d === state.meta.orca_active_dir ? "  (the one Orca is using now)" : ""}</option>`).join("")}</select>
@@ -827,7 +858,7 @@ function installDialog(p) {
   async (fd) => {
     const r = await api(`/api/profiles/${p.id}/install`, { json: { target_dir: fd.get("dir") } });
     toast(r.message);
-    renderProfile(p.id);
+    showOrcaStatus(p);
   });
 }
 
