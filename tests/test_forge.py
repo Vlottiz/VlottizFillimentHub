@@ -347,3 +347,41 @@ def test_vlottizff_group_on_export_and_round_trip(client):
     preset = client.get(f"/api/profiles/{pid}/preview").json()
     assert preset["name"] == "Giantarm PLA Silk Silver @Snapmaker U1" and preset["filament_vendor"] == ["Giantarm"]
     assert client.put("/api/settings/orca-group", json={"name": "bad/name"}).status_code == 400
+
+
+def test_export_has_version_and_exact_printer(client):
+    raw = (FIXTURES / "Giantarm PLA Silk Silver @Snapmaker U1.json").read_bytes()
+    pid = client.post("/api/orca/import-file", files=[("files", ("g.json", raw))]).json()["results"][0]["profile_id"]
+    preset = client.get(f"/api/profiles/{pid}/preview").json()
+    assert preset["version"] == orca.PRESET_VERSION
+    assert all(int(x) >= 0 for x in preset["version"].split("."))
+    # exact Orca printer name, so Orca doesn't guess "Snapmaker U1" from the "@" part of the name
+    assert preset["compatible_printers"] == ["Snapmaker U1 (0.4 nozzle)"]
+
+
+def test_active_orca_folder(tmp_path):
+    (tmp_path / "user" / "default" / "filament").mkdir(parents=True)
+    assert orca.active_user_dir(tmp_path) == tmp_path / "user" / "default" / "filament"
+    # logged in: Orca's config names the account folder, which may not have a filament folder yet
+    (tmp_path / "OrcaSlicer.conf").write_text('{"app": {"preset_folder": "a1b2c3d4-uuid", "x": 1}}')
+    active = tmp_path / "user" / "a1b2c3d4-uuid" / "filament"
+    assert orca.active_user_dir(tmp_path) == active
+    assert orca.install_dirs(tmp_path)[0] == active
+    assert tmp_path / "user" / "default" / "filament" in orca.install_dirs(tmp_path)
+    # junk in the config can't send us elsewhere
+    (tmp_path / "OrcaSlicer.conf").write_text('{"app": {"preset_folder": "../../etc"}}')
+    assert orca.active_user_dir(tmp_path) == tmp_path / "user" / "default" / "filament"
+
+
+def test_install_into_logged_in_folder(client, tmp_path):
+    orca_root = tmp_path / "orca"
+    (orca_root / "OrcaSlicer.conf").write_text('{"app": {"preset_folder": "uuid-123"}}')
+    raw = (FIXTURES / "Giantarm PLA Silk Silver @Snapmaker U1.json").read_bytes()
+    pid = client.post("/api/orca/import-file", files=[("files", ("g.json", raw))]).json()["results"][0]["profile_id"]
+    meta = client.get("/api/meta").json()
+    assert meta["orca_active_dir"].endswith("uuid-123/filament") and meta["orca_filament_dirs"][0] == meta["orca_active_dir"]
+    r = client.post(f"/api/profiles/{pid}/install", json={"target_dir": meta["orca_active_dir"]})
+    assert r.status_code == 200
+    written = json.loads((orca_root / "user" / "uuid-123" / "filament" /
+                          "VlottizFF Giantarm PLA Silk Silver @Snapmaker U1.json").read_text())
+    assert written["version"] and written["compatible_printers"] == ["Snapmaker U1 (0.4 nozzle)"]

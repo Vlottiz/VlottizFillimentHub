@@ -44,6 +44,9 @@ _META_KEYS = {
     "compatible_prints", "compatible_prints_condition", "filament_extruder_variant",
 }
 
+# Orca skips user presets without a parseable "version", so always write one.
+PRESET_VERSION = "2.0.0.0"
+
 _SAFE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
@@ -71,6 +74,7 @@ def to_preset(name: str, settings: dict, material: str | None = None,
         "inherits": inherits,
         "from": "User",
         "instantiation": "true",
+        "version": PRESET_VERSION,
         "filament_settings_id": [name],
     }
     if compatible_printers:
@@ -158,6 +162,40 @@ def user_filament_dirs(root: Path | None = None) -> list[Path]:
         return []
     return sorted(p / "filament" for p in user.iterdir()
                   if p.is_dir() and (p / "filament").is_dir())
+
+
+def active_user_dir(root: Path | None = None) -> Path | None:
+    """The user/<folder>/filament folder Orca currently loads presets from.
+
+    Orca reads presets from user/default when you're not logged in and from
+    your account folder when you are; its config file records which
+    ("preset_folder"). Falls back to user/default.
+    """
+    root = root or config_dir()
+    if not root or not root.is_dir():
+        return None
+    folder = None
+    conf = root / "OrcaSlicer.conf"
+    try:
+        text = conf.read_text(encoding="utf-8", errors="replace")
+        m = re.search(r'"preset_folder"\s*:\s*"([^"]*)"', text)
+        if m and m.group(1).strip():
+            folder = m.group(1).strip()
+    except OSError:
+        pass
+    if not folder or not re.fullmatch(r"[\w.-]+", folder):
+        folder = "default"
+    return root / "user" / folder / "filament"
+
+
+def install_dirs(root: Path | None = None) -> list[Path]:
+    """Folders the app may install into: the active one first, then any others."""
+    out = []
+    active = active_user_dir(root)
+    if active:
+        out.append(active)
+    out += [d for d in user_filament_dirs(root) if d != active]
+    return out
 
 
 def scan(root: Path | None = None) -> list[dict]:
