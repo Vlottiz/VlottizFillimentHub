@@ -204,17 +204,19 @@ def test_full_flow(client, tmp_path):
     assert client.post("/api/orca/snapshot").json()["saved"] == 0  # unchanged
     imp = client.post("/api/orca/import-path", json={"path": scan["presets"][0]["path"]}).json()
     assert imp["settings"]["nozzle_temperature"] == 215
+    assert imp["import"]["new_profile"] is False  # same preset: updated, not duplicated
+    assert imp["id"] == p["id"]
 
     # backup + restore
     z = client.get("/api/backup").content
     client.delete(f"/api/profiles/{p['id']}")
-    assert len(client.get("/api/profiles").json()) == 1
+    assert len(client.get("/api/profiles").json()) == 0
     r = client.post("/api/backup/restore", files=[("file", ("b.zip", z, "application/zip"))])
     assert r.status_code == 200
-    assert len(client.get("/api/profiles").json()) == 2
+    assert len(client.get("/api/profiles").json()) == 1
 
     zall = zipfile.ZipFile(io.BytesIO(client.get("/api/export-all").content))
-    assert len(zall.namelist()) == 2
+    assert len(zall.namelist()) == 1
 
 
 @pytest.mark.parametrize("test,inputs,current,expected", [
@@ -290,3 +292,58 @@ def test_remove_calibration_entry_and_undo(client):
     assert r["reverted"] == []
     assert client.get(f"/api/profiles/{pid}").json()["settings"]["filament_retraction_length"] == 0.6
     assert client.delete("/api/calibrations/9999").status_code == 404
+
+
+FIXTURES = __import__("pathlib").Path(__file__).parent / "fixtures"
+
+
+def test_import_real_preset_creates_filament_and_profile(client):
+    raw = (FIXTURES / "Giantarm PLA Silk Silver @Snapmaker U1.json").read_bytes()
+    r = client.post("/api/orca/import-file", files=[("files", ("g.json", raw, "application/json"))]).json()
+    res = r["results"][0]
+    assert res["new_filament"] and res["new_profile"]
+
+    f = client.get("/api/filaments").json()[0]
+    assert (f["brand"], f["name"], f["colour_name"], f["material"]) == ("Giantarm", "PLA Silk", "Silver", "PLA Silk")
+    assert f["colour_hex"] == "#c9c9c9" and f["price"] == 71.07 and f["profile_count"] == 1
+    assert f["spec"]["nozzle_min"] == 190 and f["spec"]["nozzle_max"] == 215 and f["spec"]["bed_min"] == 45
+
+    p = client.get(f"/api/profiles/{res['profile_id']}").json()
+    assert p["name"] == "Giantarm PLA Silk Silver @Snapmaker U1"
+    assert p["printer"]["name"].startswith("Snapmaker U1")            # matched from "@Snapmaker U1"
+    assert p["settings"]["pressure_advance"] == 0.035 and p["settings"]["filament_flow_ratio"] == 0.94
+    assert p["sources"]["pressure_advance"] == "imported"
+    assert p["inherits"] == "Generic PLA @System"
+
+    # importing again updates instead of duplicating
+    r = client.post("/api/orca/import-file", files=[("files", ("g.json", raw, "application/json"))]).json()
+    assert r["results"][0]["new_profile"] is False and r["results"][0]["changed"] == []
+    assert len(client.get("/api/profiles").json()) == 1 and len(client.get("/api/filaments").json()) == 1
+
+    # junk is reported per file, not a crash
+    r = client.post("/api/orca/import-file", files=[("files", ("x.json", b"{nope", "application/json")),
+                                                    ("files", ("m.json", b'{"type":"machine"}', "application/json"))]).json()
+    assert [x.get("error") for x in r["results"]] == ["Not a valid .json file", "That file isn't an OrcaSlicer filament preset"]
+
+
+def test_vlottizff_group_on_export_and_round_trip(client):
+    raw = (FIXTURES / "Giantarm PLA Silk Silver @Snapmaker U1.json").read_bytes()
+    pid = client.post("/api/orca/import-file", files=[("files", ("g.json", raw))]).json()["results"][0]["profile_id"]
+
+    assert client.get("/api/settings/orca-group").json()["name"] == "VlottizFF"  # default
+    preset = client.get(f"/api/profiles/{pid}/preview").json()
+    assert preset["name"] == "VlottizFF Giantarm PLA Silk Silver @Snapmaker U1"
+    assert preset["filament_settings_id"] == [preset["name"]]
+    assert preset["filament_vendor"] == ["VlottizFF"]
+
+    # export -> re-import lands on the same profile, brand kept as Giantarm inside the app
+    r = client.post("/api/orca/import-file", files=[("files", ("v.json", json.dumps(preset).encode()))]).json()
+    assert r["results"][0]["profile_id"] == pid and r["results"][0]["new_profile"] is False
+    p = client.get(f"/api/profiles/{pid}").json()
+    assert p["settings"]["filament_vendor"] == "Giantarm"
+
+    # switch it off
+    client.put("/api/settings/orca-group", json={"name": "VlottizFF", "as_vendor": False, "prefix_names": False})
+    preset = client.get(f"/api/profiles/{pid}/preview").json()
+    assert preset["name"] == "Giantarm PLA Silk Silver @Snapmaker U1" and preset["filament_vendor"] == ["Giantarm"]
+    assert client.put("/api/settings/orca-group", json={"name": "bad/name"}).status_code == 400

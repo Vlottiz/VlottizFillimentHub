@@ -24,6 +24,8 @@
     <div class="bar">
       <h1>Filament log</h1>
       <input id="fil-search" type="search" placeholder="Search brand, name, colour…">
+      <button id="import-json" title="Import OrcaSlicer filament presets (.json or a .zip of them)">Import .json</button>
+      <input type="file" id="import-json-file" accept=".json,.zip,application/json" multiple hidden>
       <button class="primary" id="add-filament">+ Add filament</button>
     </div>
     <div id="filament-list" class="cards"></div>
@@ -67,6 +69,7 @@
 
 <dialog id="dlg"><form method="dialog" id="dlg-form"></form></dialog>
 <div id="toast" role="status"></div>
+<div id="drop-overlay"><div>Drop Orca filament presets (.json) to import</div></div>
 <script src="app.js"></script>
 </body>
 </html>

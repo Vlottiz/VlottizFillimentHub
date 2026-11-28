@@ -100,9 +100,17 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         name = (pr or {}).get("orca_printer")
         return [name] if name and (pr or {}).get("restrict_to_printer") else None
 
+    def orca_group() -> dict:
+        return {**orca.DEFAULT_GROUP, **(db.get_setting("orca_group") or {})}
+
     def preset_for(profile: dict) -> dict:
+        """The Orca preset for a profile, named and grouped under your group (VlottizFF)."""
+        group = orca_group()
+        settings = dict(profile["settings"])
+        if group.get("as_vendor") and group.get("name", "").strip():
+            settings["filament_vendor"] = group["name"].strip()
         return orca.to_preset(
-            profile["name"], profile["settings"], material=profile.get("material"),
+            orca.group_name(profile["name"], group), settings, material=profile.get("material"),
             inherits=profile.get("inherits"), compatible_printers=compat_for(profile),
         )
 
@@ -283,6 +291,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             "SELECT id, reason, created FROM profile_versions WHERE profile_id = ? ORDER BY id DESC", (pid,))
         p["calibrations"] = db.all(
             "SELECT * FROM calibrations WHERE profile_id = ? ORDER BY id DESC", (pid,))
+        p["orca_name"] = preset_for(p)["name"]
         p["exports"] = db.all(
             "SELECT id, preset_name, target, created FROM exports WHERE profile_id = ? ORDER BY id DESC", (pid,))
         return p
@@ -566,25 +575,81 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         return Response(s["content"], media_type="application/json",
                         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
-    def _import_preset(data: dict, printer_id: int | None) -> int:
-        if data.get("type", "filament") != "filament":
-            raise HTTPException(400, "That file isn't a filament preset")
+    def _import_preset(data: dict, printer_id: int | None) -> dict:
+        """Import an Orca filament preset as a filament (log entry) + profile.
+
+        Re-importing a preset whose profile already exists updates that profile
+        (with a new history version) instead of making a duplicate.
+        """
+        if not isinstance(data, dict) or data.get("type", "filament") != "filament":
+            raise HTTPException(400, "That file isn't an OrcaSlicer filament preset")
+        group = orca_group()
         parsed = orca.from_preset(data)
-        mat = parsed["material"]
+        if not parsed["settings"]:
+            raise HTTPException(400, "That preset has no settings in it")
+        info = orca.filament_from_preset(parsed["name"], parsed["settings"], group)
+        profile_name = orca.strip_group(parsed["name"], group)
+
+        # material: the name is often more specific than filament_type ("PLA Silk")
+        ftype = parsed["material"]
+        mat = ai_extract.guess_material(f"{info['name']} {ftype or ''}") or ftype
         if mat not in materials.MATERIALS:
-            mat = next((m for m in materials.MATERIALS if mat and m.upper() == mat.upper()), mat)
+            mat = next((m for m in materials.MATERIALS if mat and m.upper() == str(mat).upper()), mat)
+
+        # printer: "@Snapmaker U1" in the name, or the preset's compatible printers
+        if printer_id is None:
+            hints = [info["printer_hint"], *(data.get("compatible_printers") or [])]
+            for pr in db.all("SELECT * FROM printers ORDER BY id"):
+                names = [pr["name"].lower(), str(pr["data"].get("orca_printer") or "").lower()]
+                if any(h and any(n.startswith(h.lower()) or h.lower().startswith(n.split(" (")[0])
+                                 for n in names if n) for h in hints):
+                    printer_id = pr["id"]
+                    break
+
+        # filament log entry: reuse one with the same brand + name
+        f = db.one("SELECT * FROM filaments WHERE lower(coalesce(brand,'')) = ? AND lower(name) = ? "
+                   "AND lower(coalesce(colour_name,'')) = ?",
+                   ((info["brand"] or "").lower(), info["name"].lower(), (info["colour_name"] or "").lower()))
+        new_filament = f is None
+        if new_filament:
+            fid = db.insert("filaments", {
+                "brand": info["brand"], "name": info["name"], "material": mat if mat in materials.MATERIALS else "PLA",
+                "colour_name": info["colour_name"], "colour_hex": info["colour_hex"],
+                "diameter": info["diameter"], "price": info["price"], "weight_g": info["weight_g"],
+                "spec": info["spec"], "notes": "Imported from an OrcaSlicer preset.",
+            })
+        else:
+            fid = f["id"]
+
+        settings = parsed["settings"]
+        if group.get("as_vendor") and settings.get("filament_vendor") == group.get("name") and info["brand"]:
+            settings["filament_vendor"] = info["brand"]  # keep the real brand inside the app
         now = time.time()
-        pid = db.insert("profiles", {
-            "filament_id": None, "printer_id": printer_id,
-            "name": parsed["name"], "material": mat, "inherits": parsed["inherits"],
-            "settings": parsed["settings"],
-            "sources": {k: "manual" for k in parsed["settings"]},
-            "notes": ["Imported from OrcaSlicer. Settings it inherits from its parent preset "
-                      f"('{parsed['inherits'] or 'none'}') are not included."],
-            "created": now, "updated": now,
-        })
-        db.save_profile_version(pid, "Imported from Orca")
-        return pid
+        existing = db.one("SELECT * FROM profiles WHERE lower(name) = ? ORDER BY id LIMIT 1", (profile_name.lower(),))
+        if existing:
+            pid = existing["id"]
+            sources = dict(existing["sources"])
+            changed = [k for k, v in settings.items() if existing["settings"].get(k) != v]
+            for k in changed:
+                sources[k] = "imported"
+            merged = {**existing["settings"], **settings}
+            db.update("profiles", pid, {"filament_id": existing["filament_id"] or fid,
+                                        "printer_id": existing["printer_id"] or printer_id, "updated": now})
+            db.set_profile_settings(pid, merged, sources,
+                                    "Re-imported from Orca" + (f": {', '.join(changed)}" if changed else " (no changes)"))
+        else:
+            changed = list(settings)
+            pid = db.insert("profiles", {
+                "filament_id": fid, "printer_id": printer_id,
+                "name": profile_name, "material": mat, "inherits": parsed["inherits"],
+                "settings": settings, "sources": {k: "imported" for k in settings},
+                "notes": [f"Imported from OrcaSlicer. Anything not in the file comes from its parent preset "
+                          f"('{parsed['inherits'] or 'none'}') in Orca."],
+                "created": now, "updated": now,
+            })
+            db.save_profile_version(pid, "Imported from Orca")
+        return {"profile_id": pid, "filament_id": fid, "new_filament": new_filament,
+                "new_profile": not existing, "changed": changed if existing else [], "name": profile_name}
 
     class ImportPath(BaseModel):
         path: str
@@ -596,16 +661,57 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         if body.path not in allowed:
             raise HTTPException(400, "Not a preset in Orca's user folder")
         data = json.loads(Path(body.path).read_text(encoding="utf-8"))
-        return profile_detail(_import_preset(data, body.printer_id))
+        r = _import_preset(data, body.printer_id)
+        return {**profile_detail(r["profile_id"]), "import": r}
 
     @app.post("/api/orca/import-file")
-    async def orca_import_file(file: UploadFile = File(...), printer_id: int | None = Form(None)):
-        raw = await file.read()
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            raise HTTPException(400, "Couldn't read that file as an Orca preset (.json)")
-        return profile_detail(_import_preset(data, printer_id))
+    async def orca_import_file(files: list[UploadFile] = File(...), printer_id: int | None = Form(None)):
+        """Import one or more Orca filament preset .json files (or a zip of them)."""
+        results = []
+        for file in files:
+            raw = await file.read(MAX_UPLOAD + 1)
+            if len(raw) > MAX_UPLOAD:
+                results.append({"file": file.filename, "error": "File is too large"})
+                continue
+            items = []
+            if raw[:2] == b"PK":
+                try:
+                    z = zipfile.ZipFile(io.BytesIO(raw))
+                    items = [(n, z.read(n)) for n in z.namelist() if n.lower().endswith(".json")][:200]
+                except zipfile.BadZipFile:
+                    results.append({"file": file.filename, "error": "Damaged zip file"})
+                    continue
+            else:
+                items = [(file.filename, raw)]
+            for name, blob in items:
+                try:
+                    data = json.loads(blob.decode("utf-8-sig"))
+                    results.append({"file": name, **_import_preset(data, printer_id)})
+                except (ValueError, UnicodeDecodeError):
+                    results.append({"file": name, "error": "Not a valid .json file"})
+                except HTTPException as e:
+                    results.append({"file": name, "error": e.detail})
+        if not results:
+            raise HTTPException(400, "No .json presets found")
+        return {"results": results}
+
+    # ------------------------------------------------- your group in Orca
+    class GroupIn(BaseModel):
+        name: str
+        as_vendor: bool = True
+        prefix_names: bool = True
+
+    @app.get("/api/settings/orca-group")
+    def get_group():
+        return orca_group()
+
+    @app.put("/api/settings/orca-group")
+    def set_group(body: GroupIn):
+        name = body.name.strip()
+        if len(name) > 40 or not re.fullmatch(r"[\w .+&-]*", name):
+            raise HTTPException(400, "Use letters, numbers, spaces and . + & - (max 40)")
+        db.set_setting("orca_group", {**body.model_dump(), "name": name})
+        return orca_group()
 
     @app.get("/api/backup")
     def backup():

@@ -6,7 +6,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtDate = (t) => t ? new Date(t * 1000).toLocaleString() : "";
-const SRC_LABEL = { calibrated: "Calibrated", manual: "You set", printer: "Printer limit",
+const SRC_LABEL = { calibrated: "Calibrated", manual: "You set", imported: "Imported", printer: "Printer limit",
   manufacturer: "Manufacturer", baseline: "Material default" };
 
 const state = { meta: null, printers: [], filaments: [], profiles: [], current: null,
@@ -267,6 +267,50 @@ async function makeProfileDialog(f) {
   });
 }
 
+/* ---------- import Orca presets (.json) ---------- */
+async function importPresets(fileList) {
+  const files = [...fileList].filter((f) => /\.(json|zip)$/i.test(f.name));
+  if (!files.length) { toast("Pick OrcaSlicer filament .json files (or a .zip of them)", true); return; }
+  const fd = new FormData();
+  files.forEach((f) => fd.append("files", f));
+  const r = await api("/api/orca/import-file", { method: "POST", body: fd });
+  const ok = r.results.filter((x) => !x.error), bad = r.results.filter((x) => x.error);
+  const what = (x) => x.new_profile ? (x.new_filament ? "new filament + profile" : "new profile") :
+    (x.changed.length ? `updated ${x.changed.length} setting${x.changed.length > 1 ? "s" : ""}` : "already up to date");
+  if (ok.length === 1 && !bad.length) {
+    toast(`Imported ${ok[0].name}: ${what(ok[0])}`);
+    state.current = ok[0].profile_id;
+    show("profiles");
+    return;
+  }
+  openDialog(`<h2>Import results</h2>
+    <ul class="found">${r.results.map((x) => `<li>${x.error
+      ? `<span class="st rejected">failed</span> <b>${esc(x.file)}</b>: ${esc(x.error)}`
+      : `<span class="st verified">ok</span> <b>${esc(x.name)}</b>: ${esc(what(x))}`}</li>`).join("")}</ul>
+    <div class="actions"><button value="cancel" class="primary">OK</button></div>`, () => {});
+  show("filaments");
+}
+
+$("#import-json").onclick = () => $("#import-json-file").click();
+$("#import-json-file").onchange = guard(async (ev) => { await importPresets(ev.target.files); ev.target.value = ""; });
+
+// Drag .json files anywhere onto the app to import them.
+let dragDepth = 0;
+const hasFiles = (ev) => [...(ev.dataTransfer?.types || [])].includes("Files");
+window.addEventListener("dragenter", (ev) => {
+  if (!hasFiles(ev) || $("#dlg").open) return;
+  dragDepth++; $("#drop-overlay").classList.add("show");
+});
+window.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("#drop-overlay").classList.remove("show"); } });
+window.addEventListener("dragover", (ev) => { if (hasFiles(ev)) ev.preventDefault(); });
+window.addEventListener("drop", guard(async (ev) => {
+  if (!hasFiles(ev)) return;
+  ev.preventDefault();
+  dragDepth = 0; $("#drop-overlay").classList.remove("show");
+  if ($("#dlg").open) return;  // dropping onto a dialog's own file box is handled there
+  await importPresets(ev.dataTransfer.files);
+}));
+
 /* ======================= PROFILES ======================= */
 async function loadProfiles() {
   state.profiles = await api("/api/profiles");
@@ -322,6 +366,7 @@ const renderProfile = guard(async (id) => {
       <div class="gauge" style="--v:${conf.overall};--gc:${gaugeColour(conf.overall)}"><span>${conf.overall}%</span></div>
       <div style="flex:1;min-width:240px">
         <input id="pf-name" value="${esc(p.name)}" style="font-size:18px;font-weight:600">
+        <div class="small muted" style="margin-top:4px">In Orca: <b>${esc(p.orca_name)}</b></div>
         <div class="row two" style="margin-top:8px">
           <div><label>Printer</label><select id="pf-printer">${printerOptions(p.printer_id)}</select></div>
           <div><label>Orca parent preset</label><input id="pf-inherits" value="${esc(p.inherits || "")}"
@@ -735,9 +780,27 @@ function klipperDialog(p) {
 async function renderBackup() {
   const m = state.meta;
   const scan = await api("/api/orca/scan");
+  const group = await api("/api/settings/orca-group");
   await loadPrinters();
   $("#backup-body").innerHTML = `
     <div class="cards wide">
+      <div class="card" style="grid-column:1/-1">
+        <div class="title">Your group in Orca</div>
+        <p class="small muted">Presets exported from this app are grouped under your own name, so they're easy to find in Orca's filament list.</p>
+        <form id="group-form">
+          <div class="row">
+            <div><label>Group name</label><input name="name" value="${esc(group.name)}" maxlength="40"></div>
+          </div>
+          <label style="display:flex;gap:8px;align-items:center;color:var(--text)"><input type="checkbox" name="prefix_names"
+            ${group.prefix_names ? "checked" : ""}> Start preset names with it, so they sort together in Orca's filament list</label>
+          <label style="display:flex;gap:8px;align-items:center;color:var(--text);margin-top:6px"><input type="checkbox" name="as_vendor"
+            ${group.as_vendor ? "checked" : ""}> Use it as the vendor (Orca groups presets by vendor when you add or manage filaments)</label>
+          <p class="small" style="margin-top:8px">Example: <b id="group-example"></b></p>
+          <p class="small muted">The real brand stays in this app and in the preset name. Changing this renames presets the next time you
+          export or install them; the old copies stay in Orca until you delete them there.</p>
+          <div class="actions"><button class="primary" type="submit">Save</button></div>
+        </form>
+      </div>
       <div class="card">
         <div class="title">OrcaSlicer folder</div>
         <p class="small">${m.orca_config_exists ? `Found at <code>${esc(m.orca_config_dir)}</code>`
@@ -754,8 +817,9 @@ async function renderBackup() {
           <a class="btn" href="/api/export-all">All profiles as Orca .json (zip)</a>
           <button id="restore">Restore backup…</button>
         </div>
-        <p class="small muted" style="margin-top:10px">Import a single Orca preset file:</p>
-        <input type="file" id="imp-file" accept=".json">
+        <p class="small muted" style="margin-top:10px">Import Orca filament presets (.json, several at once, or a .zip). You can
+          also drag files anywhere onto the app.</p>
+        <input type="file" id="imp-file" accept=".json,.zip" multiple>
       </div>
     </div>
     <h2>Filament presets in Orca (${scan.presets.length})</h2>
@@ -775,14 +839,24 @@ async function renderBackup() {
   });
   $$("[data-imp]").forEach((b) => (b.onclick = guard(async () => {
     const p = await api("/api/orca/import-path", { json: { path: b.dataset.imp } });
-    toast(`Imported ${p.name}`);
-  })));
-  $("#imp-file").onchange = guard(async (ev) => {
-    const fd = new FormData();
-    fd.append("file", ev.target.files[0]);
-    const p = await api("/api/orca/import-file", { method: "POST", body: fd });
-    toast(`Imported ${p.name}`);
+    toast(`Imported ${p.name}: ${p.import.new_profile ? "new profile" : "updated existing profile"}`);
     state.current = p.id;
+    show("profiles");
+  })));
+  $("#imp-file").onchange = guard(async (ev) => importPresets(ev.target.files));
+  const gf = $("#group-form");
+  const example = () => {
+    const n = gf.elements.name.value.trim();
+    $("#group-example").textContent = (gf.elements.prefix_names.checked && n ? n + " " : "") +
+      "Giantarm PLA Silk Silver @Snapmaker U1" + (gf.elements.as_vendor.checked && n ? `  (vendor: ${n})` : "  (vendor: Giantarm)");
+  };
+  gf.oninput = example;
+  example();
+  gf.onsubmit = guard(async (ev) => {
+    ev.preventDefault();
+    await api("/api/settings/orca-group", { method: "PUT", json: {
+      name: gf.elements.name.value, prefix_names: gf.elements.prefix_names.checked, as_vendor: gf.elements.as_vendor.checked } });
+    toast("Saved. Export or install your presets again to update them in Orca.");
   });
   $("#restore").onclick = () => {
     const form = openDialog(`<h2>Restore backup</h2>
