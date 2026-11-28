@@ -305,6 +305,9 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         p["speed"] = tuning.speed_hint(p["settings"], printer)
         p["versions"] = db.all(
             "SELECT id, reason, created FROM profile_versions WHERE profile_id = ? ORDER BY id DESC", (pid,))
+        p["loaded_in"] = [{"printer_id": pr["id"], "printer": pr["name"], "toolhead": int(n)}
+                          for pr in db.all("SELECT * FROM printers ORDER BY id")
+                          for n, v in (pr["data"].get("loaded") or {}).items() if v and v.get("profile_id") == pid]
         p["walls"] = wallmod.normalise(p.get("walls"))
         p["wall_check"] = wallmod.flow_check(p["walls"], p["settings"], printer)
         p["troubleshoots"] = [_session_view(t) for t in db.all(
@@ -611,6 +614,12 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
     @app.delete("/api/profiles/{pid}")
     def delete_profile(pid: int):
         db.delete("profiles", pid)
+        for pr in db.all("SELECT * FROM printers"):  # it can't be loaded anywhere any more
+            loaded = pr["data"].get("loaded") or {}
+            keep = {n: v for n, v in loaded.items() if not (v and v.get("profile_id") == pid)}
+            if keep != loaded:
+                pr["data"]["loaded"] = keep
+                db.update("printers", pr["id"], {"data": pr["data"]})
         return {"ok": True}
 
     # ----------------------------------------------------------------- export
@@ -1102,6 +1111,112 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             notes=orca.notes_for(d["settings"], d["sources"]))
         r = _import_preset(preset, None)
         return {**profile_detail(r["profile_id"]), "import": r}
+
+    # ------------------------------------------------------ swatch check
+    def _decode_link(link: str) -> dict:
+        text = (link or "").strip()
+        frag = text.split("#", 1)[1] if "#" in text else text
+        try:
+            return swatch.decode(frag)
+        except ValueError as e:
+            raise HTTPException(400, f"{e}. Scan the swatch again, or copy the whole link.")
+
+    def _find_profile_for(d: dict) -> dict | None:
+        names = orca.name_variants(d["name"], orca_group())
+        for p in db.all("SELECT * FROM profiles WHERE trial_of IS NULL ORDER BY id"):
+            if p["name"].lower() in names or orca.strip_group(p["name"], orca_group()).lower() in names:
+                return p
+        return None
+
+    def _swatch_diffs(app_settings: dict, sw_settings: dict) -> list[dict]:
+        labels = {k: l for k, l, *_ in FIELDS}
+        out = []
+        for k in orca.QR_FIELDS_V1:
+            a = app_settings.get(k)
+            b = sw_settings.get(k)
+            if a is None and b is None:
+                continue
+            if k == "filament_vendor" and b and str(b).lower() == orca_group().get("name", "").strip().lower():
+                continue  # exports use your group name as the vendor; the app keeps the real brand
+            if (orca._fmt(a) if a is not None else None) != (orca._fmt(b) if b is not None else None):
+                out.append({"key": k, "label": labels.get(k, k), "app": a, "swatch": b})
+        return out
+
+    class SwatchCheckIn(BaseModel):
+        link: str
+
+    @app.post("/api/swatch/check")
+    def swatch_check(body: SwatchCheckIn):
+        """After scanning a swatch: is it in the app (same values?), is it in Orca, and where can it be loaded?"""
+        d = _decode_link(body.link)
+        p = _find_profile_for(d)
+        result = {"swatch": {"name": d["name"], "printer": d["printer"], "group": d["group"],
+                             "colour": d["settings"].get("default_filament_colour"),
+                             "material": d["settings"].get("filament_type"),
+                             "nozzle": d["settings"].get("nozzle_temperature"),
+                             "calibrated": [k for k, v in d["sources"].items() if v in ("calibrated", "tested")]}}
+        if not p:
+            result["app"] = {"status": "missing"}
+            copies = orca.find_copies(orca.name_variants(d["name"], orca_group()))
+            result["orca"] = {"installed": bool(copies), "up_to_date": False, "copies": len(copies)}
+        else:
+            diffs = _swatch_diffs(p["settings"], d["settings"])
+            result["app"] = {"status": "different" if diffs else "same", "profile_id": p["id"],
+                             "name": p["name"], "diffs": diffs}
+            st = orca_status(p["id"])
+            result["orca"] = {"installed": st["installed"], "up_to_date": st["up_to_date"],
+                              "copies": len(st["copies"]), "orca_running": st["orca_running"]}
+        # printers that could load it, and what's in their toolheads now
+        printers = []
+        for pr in db.all("SELECT * FROM printers ORDER BY id"):
+            n = int(pr["data"].get("toolheads") or 1)
+            loaded = pr["data"].get("loaded") or {}
+            printers.append({"id": pr["id"], "name": pr["name"], "toolheads": n,
+                             "matches": bool(d["printer"]) and pr["data"].get("orca_printer") == d["printer"],
+                             "loaded": {str(i): loaded.get(str(i)) for i in range(1, n + 1)}})
+        printers.sort(key=lambda x: not x["matches"])
+        result["printers"] = printers
+        return result
+
+    class SwatchApplyIn(BaseModel):
+        link: str
+        action: str  # add | update
+
+    @app.post("/api/swatch/apply")
+    def swatch_apply(body: SwatchApplyIn):
+        """Add the swatch's profile to the app, or update the app's copy with the swatch's values."""
+        if body.action not in ("add", "update"):
+            raise HTTPException(400, "action must be add or update")
+        d = _decode_link(body.link)
+        existing = _find_profile_for(d)
+        if body.action == "add" and existing:
+            raise HTTPException(400, "It's already in the app")
+        if body.action == "update" and not existing:
+            raise HTTPException(400, "It isn't in the app yet")
+        return import_swatch_link(SwatchLinkIn(link=body.link))
+
+    class ToolheadIn(BaseModel):
+        profile_id: int | None = None
+
+    @app.put("/api/printers/{prid}/toolheads/{n}")
+    def set_toolhead(prid: int, n: int, body: ToolheadIn):
+        """Record which filament is loaded in a toolhead (or clear it)."""
+        pr = db.one("SELECT * FROM printers WHERE id = ?", (prid,))
+        if not pr:
+            raise HTTPException(404, "Printer not found")
+        count = int(pr["data"].get("toolheads") or 1)
+        if not 1 <= n <= count:
+            raise HTTPException(400, f"This printer has toolheads 1 to {count}")
+        loaded = dict(pr["data"].get("loaded") or {})
+        if body.profile_id is None:
+            loaded.pop(str(n), None)
+        else:
+            p = get_profile(body.profile_id)
+            loaded[str(n)] = {"profile_id": p["id"], "name": p["name"],
+                              "colour": p["settings"].get("default_filament_colour"), "at": time.time()}
+        pr["data"]["loaded"] = loaded
+        db.update("printers", prid, {"data": pr["data"]})
+        return db.one("SELECT * FROM printers WHERE id = ?", (prid,))
 
     @app.post("/api/scan-swatch")
     def scan_swatch(file: UploadFile = File(...), import_now: bool = Form(True)):

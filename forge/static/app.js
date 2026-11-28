@@ -292,6 +292,76 @@ async function importPresets(fileList) {
 }
 
 $("#import-json").onclick = () => $("#import-json-file").click();
+/* After scanning a swatch: 1) in the app? 2) in Orca? 3) which toolhead? */
+async function swatchCheck(link) {
+  let c = await api("/api/swatch/check", { json: { link } });
+  const st = { app: c.app.status === "same", orca: false, done: false };
+  const form = openDialog(`<div id="sc"></div>`, () => {});
+  const box = $("#sc", form);
+  const label = (k) => state.meta.fields.find((f) => f.key === k)?.label || k;
+  const refresh = async () => { c = await api("/api/swatch/check", { json: { link } }); st.orca = st.orca || (c.orca.installed && c.orca.up_to_date); draw(); };
+  st.orca = c.orca.installed && c.orca.up_to_date;
+
+  const step = (n, title, done, active, body) => `<div class="sc-step ${done ? "done" : ""} ${active ? "active" : ""}">
+    <div class="sc-head"><span class="num">${done ? "✓" : n}</span><b>${title}</b></div>${active || done ? `<div class="sc-body">${body}</div>` : ""}</div>`;
+
+  const draw = () => {
+    const sw = c.swatch, a = c.app, o = c.orca;
+    const appBody = a.status === "missing" ? `<p>Not in Filament Forge yet.</p>
+        <div class="actions"><button type="button" class="primary" data-sc="add">Add it to the app</button></div>`
+      : a.status === "same" || st.app ? `<p>In the app${a.status === "same" ? ", with the same values as the swatch" : ""}.</p>`
+      : `<p>In the app, but these values are different from the swatch:</p>
+        <table class="settings changes">${a.diffs.map((d) => `<tr><td>${esc(d.label)}</td>
+          <td class="nowrap">app <b>${esc(d.app ?? "—")}</b> · swatch <b>${esc(d.swatch ?? "—")}</b></td></tr>`).join("")}</table>
+        <div class="actions"><button type="button" class="primary" data-sc="update">Use the swatch's values</button>
+          <button type="button" data-sc="keep">Keep the app's</button></div>`;
+    const orcaBody = st.orca ? `<p>In Orca${o.installed && o.up_to_date ? " and up to date" : ""}.${o.orca_running ? " Restart Orca if it was just installed." : ""}</p>`
+      : `<p>${o.installed ? (o.copies > 1 ? `In Orca ${o.copies} times; installing tidies it up.` : "In Orca, but older than the app's version.") : "Not in Orca yet."}</p>
+        <div class="actions">${state.meta.orca_active_dir ? `<button type="button" class="primary" data-sc="install">${o.installed ? "Update in Orca" : "Install into Orca"}</button>` :
+          `<span class="small muted">Orca's folder wasn't found; use Export on the profile page.</span>`}
+          <button type="button" data-sc="skip-orca">Skip</button></div>`;
+    const printers = c.printers.map((pr) => `<div class="sc-printer"><div class="small muted">${esc(pr.name)}${pr.matches ? "" : " (not the printer this swatch was made for)"}</div>
+        <div class="toolheads">${Object.entries(pr.loaded).map(([n, v]) => `<button type="button" class="toolhead" data-th="${pr.id}:${n}">
+          <b>T${n}</b><span class="small">${v ? esc(v.name.split(" @")[0]) : "empty"}</span>
+          ${v?.colour ? `<span class="swatch" style="background:${esc(v.colour)}"></span>` : ""}</button>`).join("")}</div></div>`).join("");
+    const thBody = st.done ? `<p>${esc(st.done)}</p>` : `<p>Which toolhead is it loaded in?</p>${printers}
+        <div class="actions"><button type="button" data-sc="no-load">Just adding it, not loading it</button></div>`;
+
+    box.innerHTML = `<h2 style="display:flex;gap:10px;align-items:center"><span class="swatch" style="width:22px;height:22px;background:${esc(sw.colour || "#ccc")}"></span>
+        ${esc(sw.name.split(" @")[0])}</h2>
+      <p class="small muted" style="margin-top:-6px">${esc(sw.material || "")}${sw.nozzle ? ` · ${esc(sw.nozzle)} °C` : ""}${sw.printer ? ` · for ${esc(sw.printer)}` : ""}
+        ${sw.calibrated.length ? ` · ${sw.calibrated.length} settings calibrated` : ""}</p>
+      ${step(1, "In Filament Forge", st.app, !st.app, appBody)}
+      ${step(2, "In OrcaSlicer", st.orca, st.app && !st.orca, orcaBody)}
+      ${step(3, "Loaded in a toolhead", !!st.done, st.app && st.orca, thBody)}
+      <div class="actions">${st.done && c.app.profile_id ? `<button type="button" class="primary" data-sc="open">Open the profile</button>` : ""}
+        <button value="cancel" formnovalidate>Close</button></div>`;
+
+    box.querySelectorAll("[data-sc]").forEach((b) => (b.onclick = guard(async () => {
+      const act = b.dataset.sc;
+      if (act === "add" || act === "update") {
+        await api("/api/swatch/apply", { json: { link, action: act } });
+        toast(act === "add" ? "Added to the app" : "Updated from the swatch");
+        st.app = true; await refresh(); loadProfiles(); renderFilaments();
+      } else if (act === "keep") { st.app = true; draw(); }
+      else if (act === "install") {
+        const r = await api(`/api/profiles/${c.app.profile_id}/install`, { json: { target_dir: state.meta.orca_active_dir } });
+        toast(r.message); st.orca = true; await refresh();
+      } else if (act === "skip-orca") { st.orca = true; draw(); }
+      else if (act === "no-load") { st.done = "Added; not loaded in a toolhead."; draw(); }
+      else if (act === "open") { $("#dlg").close(); state.current = c.app.profile_id; show("profiles"); }
+    })));
+    box.querySelectorAll("[data-th]").forEach((b) => (b.onclick = guard(async () => {
+      const [prid, n] = b.dataset.th.split(":");
+      await api(`/api/printers/${prid}/toolheads/${n}`, { method: "PUT", json: { profile_id: c.app.profile_id } });
+      st.done = `Loaded in toolhead ${n}. In Orca, choose it for filament ${n} on the Prepare tab` +
+        (c.orca.orca_running ? " (restart Orca first if it was just installed)." : ".");
+      await refresh();
+    })));
+  };
+  draw();
+}
+
 async function importSwatchLink(link) {
   const p = await api("/api/import-swatch-link", { json: { link } });
   toast(`Imported ${p.name}: ${p.import.new_profile ? (p.import.new_filament ? "new filament + profile" : "new profile") : "updated"}`);
@@ -313,7 +383,7 @@ $("#import-link").onclick = () => {
       <div class="actions"><button type="button" id="scan-link-go">Import link</button></div></details>
     <div class="actions"><button value="cancel" formnovalidate>Close</button></div>`, () => {});
   const msg = (t, bad) => { const m = $("#scan-msg", form); m.textContent = t; m.style.color = bad ? "var(--bad)" : ""; };
-  const done = async (link) => { stop(); $("#dlg").close(); await importSwatchLink(link); };
+  const done = async (link) => { stop(); $("#dlg").close(); await swatchCheck(link); };
   $("#dlg").addEventListener("close", stop, { once: true });
 
   const send = async (blob, importNow) => {
@@ -682,7 +752,8 @@ const renderProfile = guard(async (id) => {
       <div style="flex:1;min-width:240px">
         <input id="pf-name" value="${esc(p.name)}" style="font-size:18px;font-weight:600">
         <div class="small muted" style="margin-top:4px">In Orca: <b>${esc(p.orca_name)}</b>
-          <span id="pf-orca-status" class="orca-status"></span></div>
+          <span id="pf-orca-status" class="orca-status"></span>
+          ${p.loaded_in?.length ? `<span class="tag loaded">Loaded in ${p.loaded_in.map((l) => `${esc(l.printer.split(" (")[0])} T${l.toolhead}`).join(", ")}</span>` : ""}</div>
         <div class="row two" style="margin-top:8px">
           <div><label>Printer</label><select id="pf-printer">${printerOptions(p.printer_id)}</select></div>
           <div><label>Orca parent preset</label><input id="pf-inherits" value="${esc(p.inherits || "")}"
@@ -1087,6 +1158,11 @@ async function renderPrinters() {
         `<dt>${esc(l)}</dt><dd>${p.data[k] != null && p.data[k] !== "" ? esc(p.data[k]) : `<span class="muted">not set</span>`}</dd>`).join("")}
         </dl>
       ${p.data.notes ? `<p class="small muted">${esc(p.data.notes)}</p>` : ""}
+      ${(p.data.toolheads || 0) > 0 ? `<div class="small muted" style="margin-top:8px">Loaded now:</div><div class="toolheads">${
+        [...Array(Number(p.data.toolheads)).keys()].map((i) => { const v = (p.data.loaded || {})[String(i + 1)];
+          return `<div class="toolhead static"><b>T${i + 1}</b><span class="small">${v ? esc(v.name.split(" @")[0]) : "empty"}</span>
+            ${v?.colour ? `<span class="swatch" style="background:${esc(v.colour)}"></span>` : ""}
+            ${v ? `<button type="button" class="link small" data-unload="${p.id}:${i + 1}">unload</button>` : ""}</div>`; }).join("")}</div>` : ""}
       <div class="actions">
         <button class="primary" data-act="cfg" data-id="${p.id}">Import printer.cfg</button>
         <button data-act="edit" data-id="${p.id}">Edit</button>
@@ -1094,6 +1170,13 @@ async function renderPrinters() {
       </div></div>`).join("") || `<div class="empty">No printers.</div>`;
 }
 $("#add-printer").onclick = () => printerForm({ name: "", data: {} });
+$("#printer-list").addEventListener("click", guard(async (ev) => {
+  const u = ev.target.closest("[data-unload]");
+  if (!u) return;
+  const [prid, n] = u.dataset.unload.split(":");
+  await api(`/api/printers/${prid}/toolheads/${n}`, { method: "PUT", json: { profile_id: null } });
+  renderPrinters();
+}));
 $("#printer-list").onclick = guard(async (ev) => {
   const b = ev.target.closest("button[data-act]");
   if (!b) return;
@@ -1378,7 +1461,8 @@ async function renderAI() {
     const swatchLink = location.hash.startsWith("#swatch=") ? decodeURIComponent(location.hash.slice(8)) : "";
     if (swatchLink) {
       history.replaceState(null, "", location.pathname);  // don't import twice on reload
-      try { await importSwatchLink(swatchLink); } catch (e) { toast("Couldn't import the swatch: " + e.message, true); show(view); }
+      show(view);
+      try { await swatchCheck(swatchLink); } catch (e) { toast("Couldn't read the swatch: " + e.message, true); }
     } else {
       show(view);
     }

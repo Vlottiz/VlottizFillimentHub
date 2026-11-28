@@ -262,3 +262,61 @@ def test_root_redirect_page_keeps_the_swatch_data():
     root = DOCS.parent / "index.html"
     html = root.read_text()
     assert "docs/" in html and "location.hash" in html
+
+
+def test_swatch_check_flow(client, tmp_path):
+    pid = _calibrated_profile(client)
+    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+
+    # same profile in the app, not in Orca yet
+    c = client.post("/api/swatch/check", json={"link": url}).json()
+    assert c["app"]["status"] == "same" and c["app"]["profile_id"] == pid
+    assert c["orca"]["installed"] is False
+    assert c["swatch"]["name"] == "Giantarm PLA Silk Silver @Snapmaker U1"
+    assert "pressure_advance" in c["swatch"]["calibrated"]
+    u1 = c["printers"][0]
+    assert u1["matches"] and u1["toolheads"] == 4 and u1["loaded"] == {"1": None, "2": None, "3": None, "4": None}
+
+    # the app's copy changed since the swatch was printed: differences are listed
+    client.put(f"/api/profiles/{pid}", json={"settings": {"nozzle_temperature": 205}})
+    c = client.post("/api/swatch/check", json={"link": url}).json()
+    assert c["app"]["status"] == "different"
+    assert c["app"]["diffs"] == [{"key": "nozzle_temperature", "label": "Nozzle", "app": 205, "swatch": 200}]
+    # take the swatch's values
+    client.post("/api/swatch/apply", json={"link": url, "action": "update"})
+    assert client.post("/api/swatch/check", json={"link": url}).json()["app"]["status"] == "same"
+    assert client.post("/api/swatch/apply", json={"link": url, "action": "add"}).status_code == 400
+
+    # in Orca after installing
+    orca_dir = tmp_path / "orca" / "user" / "default" / "filament"
+    orca_dir.mkdir(parents=True, exist_ok=True)
+    client.post(f"/api/profiles/{pid}/install", json={"target_dir": str(orca_dir)})
+    c = client.post("/api/swatch/check", json={"link": url}).json()
+    assert c["orca"]["installed"] and c["orca"]["up_to_date"]
+
+    # load it into toolhead 2
+    pr = client.put(f"/api/printers/{u1['id']}/toolheads/2", json={"profile_id": pid}).json()
+    assert pr["data"]["loaded"]["2"]["profile_id"] == pid
+    assert client.get(f"/api/profiles/{pid}").json()["loaded_in"] == [
+        {"printer_id": u1["id"], "printer": u1["name"], "toolhead": 2}]
+    c = client.post("/api/swatch/check", json={"link": url}).json()
+    assert c["printers"][0]["loaded"]["2"]["name"] == "Giantarm PLA Silk Silver @Snapmaker U1"
+    assert client.put(f"/api/printers/{u1['id']}/toolheads/9", json={"profile_id": pid}).status_code == 400
+    # unload; and deleting a profile clears it from toolheads
+    client.put(f"/api/printers/{u1['id']}/toolheads/2", json={"profile_id": None})
+    assert client.post("/api/swatch/check", json={"link": url}).json()["printers"][0]["loaded"]["2"] is None
+    client.put(f"/api/printers/{u1['id']}/toolheads/3", json={"profile_id": pid})
+    client.delete(f"/api/profiles/{pid}")
+    assert client.get("/api/printers").json()[0]["data"]["loaded"] == {}
+
+
+def test_swatch_check_new_filament(client):
+    pid = _calibrated_profile(client)
+    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    client.delete(f"/api/profiles/{pid}")
+    c = client.post("/api/swatch/check", json={"link": url}).json()
+    assert c["app"]["status"] == "missing" and c["orca"]["installed"] is False
+    p = client.post("/api/swatch/apply", json={"link": url, "action": "add"}).json()
+    assert p["sources"]["pressure_advance"] == "calibrated"
+    assert client.post("/api/swatch/check", json={"link": url}).json()["app"]["status"] == "same"
+    assert client.post("/api/swatch/check", json={"link": "https://x/#nonsense"}).status_code == 400

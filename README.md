@@ -104,6 +104,8 @@ On a profile, click **Print QR swatch** to download a `.3mf` plate (60 × 60 × 
 
 The filament's name is printed under the code (you can change the text in the dialog, or leave it blank).
 
+**Swatch check:** however you scan a swatch, the app walks you through three steps: **(1) In Filament Forge?** (adds it if missing; if the app's copy has changed since the swatch was printed, it lists the differences and lets you use the swatch's values or keep the app's), **(2) In OrcaSlicer?** (installs or updates it), and **(3) Which toolhead is it loaded in?** (or just adding it). The app remembers what's in each toolhead: see the Printers page (with **unload**) and the badge on the profile. Orca itself still needs you to pick the filament for that slot on the Prepare tab.
+
 **Getting a swatch into the app:**
 - **Scan swatch** (Filaments page): hold the swatch up to your PC's webcam, or upload a photo of it. The app reads the code and imports the profile.
 - On the scan page (phone or PC): **Add to Filament Forge on this computer** opens the app and imports it, if the app is running on that computer. On a phone, **Save or send** the .json or bundle instead.
