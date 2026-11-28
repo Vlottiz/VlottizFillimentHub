@@ -198,3 +198,21 @@ table.walls-table input { padding: 4px 7px; max-width: 120px; }
 button.toolhead:hover { border-color: var(--accent); }
 .toolhead .swatch { width: 14px; height: 14px; }
 .tag.loaded { background: var(--good); color: #fff; margin-left: 6px; }
+
+.tag.live { background: var(--accent); color: #fff; margin-left: 6px; font-weight: 500; }
+.picks { display: grid; gap: 6px; margin: 8px 0; }
+label.pick { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 8px; color: var(--text); cursor: pointer; }
+label.pick:has(input:checked) { border-color: var(--accent); }
+label.pick input { margin-top: 3px; width: auto; flex: none; }
+label.pick > span { flex: 1; }
+.bar-meter { height: 8px; border-radius: 4px; background: var(--panel-2); overflow: hidden; margin: 4px 0; }
+.bar-meter span { display: block; height: 100%; background: var(--good); }
+.bar-meter.low span { background: var(--bad); }
+.card.spool.done { opacity: .6; }
+.spool-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.spool-mini { min-width: 150px; flex: 1; max-width: 220px; }
+.copyline { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+.copyline code { flex: 1; padding: 8px 10px; background: var(--panel-2); border-radius: 6px; overflow-x: auto; white-space: nowrap; font-size: 12px; }
+table.usage td { vertical-align: top; }
+table.usage select { max-width: 200px; margin-top: 2px; }

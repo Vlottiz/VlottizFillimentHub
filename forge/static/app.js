@@ -60,7 +60,7 @@ function show(view) {
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + view));
   ({ filaments: renderFilaments, profiles: loadProfiles, calibrate: renderCalibrate,
-    printers: renderPrinters, backup: renderBackup, ai: renderAI })[view]?.();
+    printers: renderPrinters, backup: renderBackup, ai: renderAI, spools: renderSpools })[view]?.();
   try { localStorage.setItem("ff-view", view); } catch {}
 }
 $$("#tabs button").forEach((b) => (b.onclick = () => show(b.dataset.view)));
@@ -357,10 +357,39 @@ async function swatchCheck(link) {
       st.done = `Loaded in toolhead ${n}. In Orca, choose it for filament ${n} on the Prepare tab` +
         (c.orca.orca_running ? " (restart Orca first if it was just installed)." : ".");
       await refresh();
+      await spoolPick(box, c.app.profile_id, prid, n);
     })));
   };
   draw();
 }
+
+/* Which spool is it? Shown after loading a filament in a toolhead. */
+async function spoolPick(box, profileId, prid, n) {
+  const list = await api(`/api/spools?profile_id=${profileId}`);
+  const el = document.createElement("div");
+  el.className = "sc-step active";
+  const draw = (msg) => {
+    el.innerHTML = `<div class="sc-head"><span class="num">#</span><b>Which spool?</b></div><div class="sc-body">${msg || (list.length
+      ? `<p>Pick the spool you loaded, so prints come off the right one.</p><div class="toolheads">${list.map((sp) =>
+          `<button type="button" class="toolhead" data-sp="${sp.id}"><b>#${sp.number}</b><span class="small">${spoolLeft(sp)}</span></button>`).join("")}
+          <button type="button" class="toolhead" data-sp="new"><b>+ New</b><span class="small">a new spool</span></button></div>`
+      : `<p>No spools of this yet. Is it a new spool?</p><div class="actions"><button type="button" class="primary" data-sp="new">Add spool #1 (1 kg)</button></div>`)}</div>`;
+    el.querySelectorAll("[data-sp]").forEach((b) => (b.onclick = guard(async () => {
+      let id = b.dataset.sp;
+      if (id === "new") id = (await api("/api/spools", { json: { profile_id: profileId } }))[0].id;
+      await api(`/api/printers/${prid}/toolheads/${n}`, { method: "PUT", json: { profile_id: profileId, spool_id: Number(id) } });
+      const sp = (await api(`/api/spools?profile_id=${profileId}`)).find((x) => x.id == id);
+      draw(`<p>Spool <b>${esc(sp.label)}</b> is in T${n}. Orca prints will be taken off it.</p>`);
+    })));
+  };
+  if (list.length === 1) {
+    draw(`<p>Spool <b>${esc(list[0].label)}</b> (${spoolLeft(list[0])}) is in T${n}.</p>`);
+  } else draw();
+  const actions = box.querySelector(":scope > .actions");
+  box.insertBefore(el, actions);
+}
+
+const spoolLeft = (sp) => sp.remaining_g == null ? "? g" : `${Math.round(sp.remaining_g)} g left`;
 
 async function importSwatchLink(link) {
   const p = await api("/api/import-swatch-link", { json: { link } });
@@ -789,6 +818,7 @@ const renderProfile = guard(async (id) => {
       <div><span class="muted small">Limited by</span><b>${esc(sp.limited_by || "?")}</b></div>
     </div>
 
+    ${spoolsCard(p)}
     ${wallsCard(p)}
 
     ${p.notes?.length ? `<div class="notes"><ul style="margin:0;padding-left:18px">${p.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></div>` : ""}
@@ -848,6 +878,7 @@ const renderProfile = guard(async (id) => {
     loadProfiles();
   });
   $("#pf-qr").onclick = () => qrDialog(p);
+  $("#pf-add-spool") && ($("#pf-add-spool").onclick = () => spoolForm({ profile_id: p.id }, () => renderProfile(p.id)));
   wireWalls(p, el);
   $("#pf-fix").onclick = () => fixDialog(p);
   $$("[data-trial]", el).forEach((b) => (b.onclick = guard(async () => {
@@ -1151,9 +1182,10 @@ async function loadPrinters() { state.printers = await api("/api/printers"); }
 
 async function renderPrinters() {
   await loadPrinters();
+  try { state.spoolNames = Object.fromEntries((await api("/api/spools?include_done=true")).map((s) => [s.id, s.label])); } catch {}
   $("#printer-list").innerHTML = state.printers.map((p) => `
     <div class="card">
-      <div class="title">${esc(p.name)}</div>
+      <div class="title">${esc(p.name)} ${p.data.orca_link ? `<span class="tag live" title="Settings and loaded filaments follow Orca">Linked to Orca · live</span>` : ""}</div>
       <dl class="kv" style="margin-top:8px">${PRINTER_FIELDS.map(([k, l]) =>
         `<dt>${esc(l)}</dt><dd>${p.data[k] != null && p.data[k] !== "" ? esc(p.data[k]) : `<span class="muted">not set</span>`}</dd>`).join("")}
         </dl>
@@ -1161,10 +1193,14 @@ async function renderPrinters() {
       ${(p.data.toolheads || 0) > 0 ? `<div class="small muted" style="margin-top:8px">Loaded now:</div><div class="toolheads">${
         [...Array(Number(p.data.toolheads)).keys()].map((i) => { const v = (p.data.loaded || {})[String(i + 1)];
           return `<div class="toolhead static"><b>T${i + 1}</b><span class="small">${v ? esc(v.name.split(" @")[0]) : "empty"}</span>
+            ${v?.spool_id ? `<span class="small muted">${esc(state.spoolNames?.[v.spool_id] || "")}</span>` : ""}
+            ${v?.source === "orca" ? `<span class="small muted">from Orca${v.profile_id ? "" : " · not in the app"}</span>` : ""}
             ${v?.colour ? `<span class="swatch" style="background:${esc(v.colour)}"></span>` : ""}
             ${v ? `<button type="button" class="link small" data-unload="${p.id}:${i + 1}">unload</button>` : ""}</div>`; }).join("")}</div>` : ""}
       <div class="actions">
-        <button class="primary" data-act="cfg" data-id="${p.id}">Import printer.cfg</button>
+        ${p.data.orca_link ? `<button data-act="unlink" data-id="${p.id}">Unlink from Orca</button>`
+          : `<button data-act="link" data-id="${p.id}">Link to Orca</button>`}
+        <button data-act="cfg" data-id="${p.id}">Import printer.cfg</button>
         <button data-act="edit" data-id="${p.id}">Edit</button>
         <button class="danger" data-act="del" data-id="${p.id}">Delete</button>
       </div></div>`).join("") || `<div class="empty">No printers.</div>`;
@@ -1183,11 +1219,38 @@ $("#printer-list").onclick = guard(async (ev) => {
   const p = state.printers.find((x) => x.id == b.dataset.id);
   if (b.dataset.act === "edit") printerForm(p);
   if (b.dataset.act === "cfg") klipperDialog(p);
+  if (b.dataset.act === "link") linkOrcaDialog(p);
+  if (b.dataset.act === "unlink") { await api(`/api/printers/${p.id}/unlink-orca`, { json: {} }); toast("Unlinked"); renderPrinters(); }
   if (b.dataset.act === "del" && confirm(`Delete ${p.name}?`)) {
     await api(`/api/printers/${p.id}`, { method: "DELETE" });
     renderPrinters();
   }
 });
+
+$("#link-orca-printer").onclick = () => linkOrcaDialog(null);
+
+async function linkOrcaDialog(target) {
+  const r = await api("/api/orca/printers");
+  const rows = r.printers.map((x) => `<label class="pick"><input type="radio" name="op" value="${esc(x.name)}" ${x.current ? "checked" : ""}>
+      <span><b>${esc(x.name)}</b>${x.current ? ` <span class="tag">selected in Orca now</span>` : ""}${x.linked_to ? ` <span class="tag live">linked</span>` : ""}
+      <span class="small muted" style="display:block">${[x.fields.toolheads && `${x.fields.toolheads} toolhead${x.fields.toolheads > 1 ? "s" : ""}`,
+        x.fields.nozzle_diameter && `${x.fields.nozzle_diameter} mm nozzle`, x.fields.bed_x && `${x.fields.bed_x}×${x.fields.bed_y} bed`,
+        x.fields.max_velocity && `${x.fields.max_velocity} mm/s`].filter(Boolean).join(" · ")}</span></span></label>`).join("");
+  openDialog(`<h2>${target ? `Link ${esc(target.name)} to Orca` : "Link a printer from Orca"}</h2>
+    ${!r.found ? `<p>Orca's settings folder wasn't found on this computer. Open Orca once, then try again.</p>`
+      : !r.printers.length ? `<p>No printers found in Orca. Add your printer in Orca first.</p>` : `
+    <p class="muted">Pick the printer as it's set up in Orca. Its settings come across, and the app then follows Orca:
+      when you change a filament slot or the printer's settings in Orca, it updates here within a few seconds.</p>
+    <div class="picks">${rows}</div>`}
+    <div class="actions">${r.printers.length ? `<button class="primary" value="link">Link</button>` : ""}<button value="cancel" formnovalidate>Cancel</button></div>`,
+  async (fd) => {
+    const name = fd.get("op");
+    if (!name) { toast("Pick a printer", true); return false; }
+    const pr = await api("/api/printers/link-orca", { json: { orca_printer: name, printer_id: target?.id ?? null } });
+    toast(`${pr.name} linked to Orca`);
+    renderPrinters();
+  });
+}
 
 function printerForm(p) {
   openDialog(`<h2>${p.id ? "Edit printer" : "Add printer"}</h2>
@@ -1240,6 +1303,181 @@ function klipperDialog(p) {
     $("#cfg-apply").disabled = !Object.keys(parsed.fields).length;
   });
 }
+
+/* ======================= SPOOLS ======================= */
+function spoolBar(sp) {
+  const pct = sp.percent ?? 0;
+  return `<div class="bar-meter ${sp.low ? "low" : ""}"><span style="width:${pct}%"></span></div>
+    <div class="small"><b>${spoolLeft(sp)}</b>${sp.net_g ? ` of ${Math.round(sp.net_g)} g` : ""}${sp.percent != null ? ` · ${sp.percent}%` : ""}</div>`;
+}
+
+function spoolsCard(p) {
+  const list = (p.spools || []).filter((s) => s.status === "active");
+  return `<h2>Spools</h2><div class="card">
+    ${list.length ? `<div class="spool-row">${list.map((sp) => `<div class="spool-mini"><b>#${sp.number}</b> ${spoolBar(sp)}
+      ${sp.loaded_in.length ? `<div class="small muted">in ${sp.loaded_in.map((l) => `T${l.toolhead}`).join(", ")}</div>` : ""}</div>`).join("")}</div>`
+      : `<p class="small muted" style="margin-top:0">No spools of this filament yet.</p>`}
+    <div class="actions"><button type="button" id="pf-add-spool">+ Add spool</button>
+      <button type="button" onclick="show('spools')">All spools</button></div></div>`;
+}
+
+async function spoolForm(sp, after) {
+  if (!state.profiles.length) state.profiles = await api("/api/profiles");
+  const profs = state.profiles.filter((p) => !p.trial_of);
+  const edit = !!sp.id;
+  openDialog(`<h2>${edit ? `Edit ${esc(sp.label)}` : "Add spools"}</h2>
+    ${edit ? "" : `<div><label>Filament (profile)</label><select name="profile_id" required>${profs.map((p) =>
+      `<option value="${p.id}" ${p.id == sp.profile_id ? "selected" : ""}>${esc(p.name.split(" @")[0])}</option>`).join("")}</select></div>`}
+    <div class="row" style="margin-top:10px">
+      ${edit ? `<div><label>Number</label><input name="number" type="number" min="1" value="${esc(sp.number)}"></div>`
+        : `<div><label>How many spools</label><input name="count" type="number" min="1" max="50" value="1"></div>`}
+      <div><label>Filament on a full spool (g)</label><input name="net_g" type="text" inputmode="decimal" value="${esc(sp.net_g ?? 1000)}"></div>
+      <div><label>Empty spool weight (g)</label><input name="tare_g" type="text" inputmode="decimal" value="${esc(sp.tare_g ?? "")}" placeholder="e.g. 180"></div>
+      <div><label>Left now (g)</label><input name="remaining_g" type="text" inputmode="decimal" value="${esc(sp.remaining_g ?? "")}" placeholder="full"></div>
+    </div>
+    <p class="small muted">The empty spool weight lets you weigh the spool on a kitchen scale to see what's really left.
+      Weigh an empty spool of the same brand, or check the maker's site (cardboard spools are often 120–180 g, plastic 180–250 g).</p>
+    <div><label>Notes</label><input name="notes" value="${esc(sp.notes ?? "")}" placeholder="e.g. opened March, dried 6 h"></div>
+    <div class="actions"><button class="primary" value="save">${edit ? "Save" : "Add"}</button><button value="cancel" formnovalidate>Cancel</button></div>`,
+  async (fd) => {
+    const num = (k) => { const v = String(fd.get(k) ?? "").trim().replace(",", "."); return v === "" ? null : Number(v); };
+    const body = { net_g: num("net_g"), tare_g: num("tare_g"), remaining_g: num("remaining_g"), notes: fd.get("notes") };
+    if (edit) {
+      body.number = num("number");
+      await api(`/api/spools/${sp.id}`, { method: "PUT", json: body });
+      toast("Saved");
+    } else {
+      const made = await api("/api/spools", { json: { ...body, profile_id: Number(fd.get("profile_id")), count: num("count") || 1 } });
+      toast(`Added ${made.map((m) => "#" + m.number).join(", ")}`);
+    }
+    (after || renderSpools)();
+  });
+}
+
+function weighDialog(sp) {
+  openDialog(`<h2>Weigh ${esc(sp.label)}</h2>
+    <p class="muted">Put the spool on the scale, filament and all. Enter what it reads.</p>
+    <div class="row"><div><label>Scale reading (g)</label><input name="gross" type="text" inputmode="decimal" required autofocus></div>
+      <div><label>Empty spool weight (g)</label><input name="tare" type="text" inputmode="decimal" value="${esc(sp.tare_g ?? "")}" placeholder="needed once"></div></div>
+    <p class="small muted">The app thinks ${spoolLeft(sp)}. Weighing corrects it.</p>
+    <div class="actions"><button class="primary" value="save">Save</button><button value="cancel" formnovalidate>Cancel</button></div>`,
+  async (fd) => {
+    const n = (v) => (String(v ?? "").trim() === "" ? null : Number(String(v).replace(",", ".")));
+    const r = await api(`/api/spools/${sp.id}/weigh`, { json: { gross_g: n(fd.get("gross")), tare_g: n(fd.get("tare")) } });
+    toast(`${Math.round(r.remaining_g)} g left` + (Math.abs(r.difference_g) >= 1 ? ` (${r.difference_g > 0 ? r.difference_g + " g less" : -r.difference_g + " g more"} than counted)` : ""));
+    renderSpools();
+  });
+}
+
+const USE_STATUS = { counted: "Counted", not_printed: "Didn't print", failed: "Failed" };
+
+async function renderSpools() {
+  const all = $("#spool-all").checked;
+  const [list, use, hook] = await Promise.all([api(`/api/spools?include_done=${all}`), api("/api/usage?limit=30"), api("/api/usage/hook")]);
+  state.spools = list;
+  const groups = {};
+  list.forEach((sp) => (groups[sp.name] ||= []).push(sp));
+  $("#spools-body").innerHTML = `
+    <div class="cards">${Object.entries(groups).map(([name, sps]) => sps.map((sp) => `
+      <div class="card spool ${sp.status !== "active" ? "done" : ""}">
+        <div class="title"><span class="swatch" style="background:${esc(sp.colour || "#ccc")}"></span> ${esc(name)} <span class="muted">#${sp.number}</span>
+          ${sp.status !== "active" ? `<span class="tag">${esc(sp.status)}</span>` : ""}</div>
+        <div class="small muted">${esc(sp.material || "")}${sp.loaded_in.length ? ` · in ${sp.loaded_in.map((l) => `${esc(l.printer.split(" (")[0])} T${l.toolhead}`).join(", ")}` : ""}</div>
+        <div style="margin:8px 0">${spoolBar(sp)}</div>
+        <div class="small muted">${sp.prints ? `${sp.prints} print${sp.prints > 1 ? "s" : ""}, ${sp.printed_g} g` : "No prints counted yet"}${sp.notes ? ` · ${esc(sp.notes)}` : ""}</div>
+        <div class="actions">
+          <button type="button" data-spool="weigh" data-id="${sp.id}">Weigh</button>
+          <button type="button" data-spool="edit" data-id="${sp.id}">Edit</button>
+          ${sp.status === "active" ? `<button type="button" data-spool="empty" data-id="${sp.id}">Used up</button>`
+            : `<button type="button" data-spool="active" data-id="${sp.id}">Back in use</button>`}
+          <button type="button" class="danger" data-spool="del" data-id="${sp.id}">Delete</button>
+        </div></div>`).join("")).join("") || `<div class="empty">No spools yet. Add one with <b>+ Add spool</b>, or pick a spool when you scan a swatch.</div>`}</div>
+
+    <h2>Recent prints</h2>
+    <div class="card">
+    ${use.length ? `<table class="settings usage">${use.map((u) => `<tr class="${u.status !== "counted" ? "muted" : ""}">
+        <td>${esc(u.job || "Print")}<div class="small muted">${fmtDate(u.created)} · T${u.slot}</div></td>
+        <td>${esc(u.filament || "?")}<div class="small">
+          <select data-use-spool="${u.id}"><option value="">no spool</option>${list.filter((sp) => !u.profile_id || sp.profile_id === u.profile_id || sp.id === u.spool_id).map((sp) =>
+            `<option value="${sp.id}" ${sp.id === u.spool_id ? "selected" : ""}>${esc(sp.label)}</option>`).join("")}</select></div></td>
+        <td class="nowrap"><b>${u.counted_g.toFixed(1)} g</b>${u.counted_g !== u.grams ? `<div class="small muted">of ${u.grams.toFixed(1)} g</div>` : ""}</td>
+        <td class="nowrap small">${esc(USE_STATUS[u.status])}${u.status === "failed" ? ` at ${esc(u.data.percent)}%` : ""}<div>
+          ${u.status !== "not_printed" ? `<button type="button" class="link small" data-use="not_printed" data-id="${u.id}">didn't print</button>` : ""}
+          ${u.status !== "failed" ? `<button type="button" class="link small" data-use="failed" data-id="${u.id}">failed part way</button>` : ""}
+          ${u.status !== "counted" ? `<button type="button" class="link small" data-use="counted" data-id="${u.id}">printed fully</button>` : ""}</div></td>
+      </tr>`).join("")}</table>` : `<p class="small muted" style="margin:0">No prints counted yet. Set up the Orca hook below, then slice and export or send a print.</p>`}
+    </div>
+
+    <h2>Count prints from Orca automatically</h2>
+    <div class="card">
+      <p class="small" style="margin-top:0">Orca can run Filament Forge after every slice you <b>export or send to the printer</b>. It reads how many grams
+        each filament slot uses and takes them off the spool loaded in that toolhead. It only reads the G-code, never changes it.</p>
+      <ol class="small">
+        <li>In Orca, open the <b>process</b> (print settings) and turn on <b>Advanced</b> view.</li>
+        <li>Go to <b>Others → Post-processing Scripts</b> and paste this line:</li>
+      </ol>
+      <div class="copyline"><code id="hook-cmd">${esc(hook.command)}</code><button type="button" id="hook-copy">Copy</button></div>
+      <ol class="small" start="3">
+        <li>Save the process preset. Do it for each process preset you print with (or save it into your favourites).</li>
+      </ol>
+      <p class="small muted">If Filament Forge isn't open when you export, the print is counted the next time it starts.
+        Slicing alone counts nothing; only export or send does. If a print fails, mark it above so the spool gets the rest back.</p>
+    </div>`;
+
+  $$("[data-spool]").forEach((b) => (b.onclick = guard(async () => {
+    const sp = list.find((x) => x.id == b.dataset.id), act = b.dataset.spool;
+    if (act === "weigh") return weighDialog(sp);
+    if (act === "edit") return spoolForm(sp);
+    if (act === "del") { if (!confirm(`Delete ${sp.label}? Its print history stays.`)) return; await api(`/api/spools/${sp.id}`, { method: "DELETE" }); }
+    if (act === "empty" || act === "active") await api(`/api/spools/${sp.id}`, { method: "PUT", json: { status: act } });
+    renderSpools();
+  })));
+  $$("[data-use]").forEach((b) => (b.onclick = guard(async () => {
+    const body = { status: b.dataset.use };
+    if (body.status === "failed") {
+      const pct = prompt("How far did it get? (percent, e.g. 40)", "50");
+      if (pct === null) return;
+      body.percent = Number(String(pct).replace("%", "").replace(",", "."));
+    }
+    await api(`/api/usage/${b.dataset.id}`, { method: "PUT", json: body });
+    renderSpools();
+  })));
+  $$("[data-use-spool]").forEach((sel) => (sel.onchange = guard(async () => {
+    await api(`/api/usage/${sel.dataset.useSpool}`, { method: "PUT", json: { spool_id: sel.value ? Number(sel.value) : null } });
+    renderSpools();
+  })));
+  $("#hook-copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(hook.command); toast("Copied"); }
+    catch { getSelection().selectAllChildren($("#hook-cmd")); toast("Press Ctrl+C to copy"); }
+  };
+}
+$("#add-spool").onclick = () => spoolForm({});
+$("#spool-all").onchange = () => renderSpools();
+$("#count-gcode").onclick = () => $("#count-gcode-file").click();
+$("#count-gcode-file").onchange = guard(async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  ev.target.value = "";
+  const r = await api("/api/usage/gcode", { method: "POST", body: fd });
+  toast(r.message);
+  renderSpools();
+});
+
+/* Follow Orca: when a filament slot or a linked printer changes in Orca, update what's on screen. */
+async function followOrca() {
+  if (document.visibilityState !== "visible") return;
+  try {
+    const r = await api("/api/orca/live");
+    if (!r.changed?.length) return;
+    const view = localStorage.getItem("ff-view");
+    if ($("#dlg").open) return;
+    if (view === "printers") renderPrinters();
+    else if (view === "spools") renderSpools();
+    else if (view === "profiles" && state.current) renderProfile(state.current);
+  } catch {}
+}
+setInterval(followOrca, 3000);
 
 /* ======================= ORCA & BACKUP ======================= */
 async function renderBackup() {

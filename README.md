@@ -168,6 +168,32 @@ Other ways to run it (AI tab → Settings):
 
 Tips: big stores like Amazon often block apps. The maker's own page, the technical data sheet PDF, or a screenshot work best. **Remove AI files** frees the disk space again.
 
+## Printers from Orca (live)
+
+**Printers → Link from Orca** lists the printers you've set up in OrcaSlicer (the one selected in Orca now is first).
+Pick one and its toolheads, nozzle, bed size and speed limits come across, with no `printer.cfg` needed, so this works
+for any printer Orca knows (a Centauri Carbon, a Bambu, anything). After that the app **follows Orca**: change a
+filament slot or the printer's settings in Orca and the Printers page updates within a few seconds. Orca writes its
+slots to its own settings file straight away; the app only reads that file and never changes it.
+
+If you choose a toolhead in the app (after scanning a swatch), the app keeps your choice until you next change that
+printer's filaments in Orca. Pushing a filament *into* an Orca slot from the app needs Orca's plugin system
+(Orca 2.5.2 or newer); that's the next step.
+
+## Spools
+
+Each filament can have several spools, numbered **#1, #2, #3…**. Add them from **Spools → + Add spool** (or from the
+profile page, or when you scan a swatch and pick a toolhead: it asks which spool you loaded).
+
+- **Weigh**: put the spool on a kitchen scale and enter the reading. With the empty spool's weight set once, the
+  app works out what's really left and corrects its count.
+- **Count prints from Orca**: the Spools page shows a line to paste into Orca's process settings, under
+  **Others → Post-processing Scripts**. After every slice you export or send, Orca runs it. Filament Forge reads the
+  grams each slot uses from the G-code and takes them off the spool loaded in that toolhead. It never changes the
+  G-code. If the app is closed, the print is counted when it next starts.
+- **Recent prints**: mark a print as *didn't print* (all the filament goes back) or *failed part way* (you say how
+  far), or move it to the spool it really used.
+
 ## Backups
 
 **Orca & backup** tab:

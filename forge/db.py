@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import functools
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -74,12 +76,45 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS spools (
+    id INTEGER PRIMARY KEY,
+    profile_id INTEGER REFERENCES profiles(id) ON DELETE SET NULL,
+    filament_id INTEGER REFERENCES filaments(id) ON DELETE SET NULL,
+    number INTEGER NOT NULL DEFAULT 1,
+    net_g REAL, tare_g REAL, remaining_g REAL,
+    status TEXT NOT NULL DEFAULT 'active',
+    notes TEXT,
+    created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY,
+    spool_id INTEGER REFERENCES spools(id) ON DELETE SET NULL,
+    profile_id INTEGER REFERENCES profiles(id) ON DELETE SET NULL,
+    printer_id INTEGER REFERENCES printers(id) ON DELETE SET NULL,
+    slot INTEGER,
+    kind TEXT NOT NULL DEFAULT 'print',
+    job TEXT,
+    grams REAL NOT NULL DEFAULT 0,
+    counted_g REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'counted',
+    data TEXT NOT NULL DEFAULT '{}',
+    created REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS orca_snapshots (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL, name TEXT, content TEXT NOT NULL,
     created REAL NOT NULL
 );
 """
+
+def _locked(fn):
+    """The app serves requests on several threads but shares one connection: take turns."""
+    @functools.wraps(fn)
+    def wrapper(self, *a, **kw):
+        with self.lock:
+            return fn(self, *a, **kw)
+    return wrapper
+
 
 JSON_COLS = {"data", "spec", "settings", "sources", "notes", "inputs", "photos", "diagnosis", "changes", "walls"}
 
@@ -89,6 +124,7 @@ class DB:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.RLock()
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -120,12 +156,15 @@ class DB:
                 pass
         return out
 
+    @_locked
     def all(self, sql: str, args=()) -> list[dict]:
         return [self._row(r) for r in self.conn.execute(sql, args).fetchall()]
 
+    @_locked
     def one(self, sql: str, args=()) -> dict | None:
         return self._row(self.conn.execute(sql, args).fetchone())
 
+    @_locked
     def insert(self, table: str, values: dict) -> int:
         values = {k: (json.dumps(v) if k in JSON_COLS and not isinstance(v, str) else v)
                   for k, v in values.items()}
@@ -136,6 +175,7 @@ class DB:
         self.conn.commit()
         return cur.lastrowid
 
+    @_locked
     def update(self, table: str, row_id: int, values: dict) -> None:
         if not values:
             return
@@ -145,21 +185,25 @@ class DB:
         self.conn.execute(f"UPDATE {table} SET {sets} WHERE id = ?", [*values.values(), row_id])
         self.conn.commit()
 
+    @_locked
     def delete(self, table: str, row_id: int) -> None:
         self.conn.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
         self.conn.commit()
 
     # -- app settings (JSON values) ---------------------------------------
+    @_locked
     def get_setting(self, key: str, default=None):
         row = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return json.loads(row[0]) if row else default
 
+    @_locked
     def set_setting(self, key: str, value) -> None:
         self.conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
                           "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, json.dumps(value)))
         self.conn.commit()
 
     # -- profiles with history -------------------------------------------
+    @_locked
     def save_profile_version(self, profile_id: int, reason: str) -> None:
         p = self.one("SELECT settings, sources FROM profiles WHERE id = ?", (profile_id,))
         if p:
