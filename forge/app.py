@@ -17,10 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import calibration, klipper, materials, orca, swatch, tuning
+from . import calibration, klipper, materials, orca, swatch, troubleshoot, tuning
 from .ai import extract as ai_extract
 from .ai.runtime import OllamaManager
-from .db import DB
+from .db import DB, SCHEMA as SCHEMA_SQL
 from .fields import FIELDS
 
 ROOT = Path(__file__).resolve().parent
@@ -299,6 +299,12 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         p["speed"] = tuning.speed_hint(p["settings"], printer)
         p["versions"] = db.all(
             "SELECT id, reason, created FROM profile_versions WHERE profile_id = ? ORDER BY id DESC", (pid,))
+        p["troubleshoots"] = [_session_view(t) for t in db.all(
+            "SELECT * FROM troubleshoots WHERE profile_id = ? OR trial_profile_id = ? ORDER BY id DESC", (pid, pid))]
+        if p.get("trial_of"):
+            orig = db.one("SELECT id, name FROM profiles WHERE id = ?", (p["trial_of"],))
+            sess = db.one("SELECT * FROM troubleshoots WHERE trial_profile_id = ? ORDER BY id DESC LIMIT 1", (pid,))
+            p["trial"] = {"original": orig, "session": _session_view(sess) if sess else None}
         p["calibrations"] = db.all(
             "SELECT * FROM calibrations WHERE profile_id = ? ORDER BY id DESC", (pid,))
         p["orca_name"] = preset_for(p)["name"]
@@ -353,6 +359,136 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         if done:
             db.set_profile_settings(pid, settings, sources, "Confirmed in a print: " + ", ".join(done))
         return profile_detail(pid)
+
+    # ------------------------------------------------------ issue detector
+    def _save_photos(pid: int, uploads) -> tuple[list[str], list[bytes]]:
+        names, blobs = [], []
+        for ph in uploads or []:
+            if not ph.filename:
+                continue
+            ext = Path(ph.filename).suffix.lower()
+            if ext not in PHOTO_EXT:
+                raise HTTPException(400, f"{ph.filename}: only image files can be attached")
+            data = ph.file.read(15_000_001)
+            if len(data) > 15_000_000:
+                raise HTTPException(400, f"{ph.filename} is over 15 MB")
+            PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+            name = f"{pid}-issue-{int(time.time())}-{secrets.token_hex(4)}{ext}"
+            (PHOTO_DIR / name).write_bytes(data)
+            names.append(name)
+            blobs.append(data)
+        return names, blobs[:4]
+
+    def _session_view(sess: dict) -> dict:
+        diag = sess["diagnosis"] or {}
+        for it in diag.get("issues", []):
+            info = troubleshoot.ISSUES.get(it["id"], {})
+            it["title"], it["tips"], it["looks_like"] = info.get("title"), info.get("tips", []), info.get("looks_like")
+        return sess
+
+    @app.get("/api/issues")
+    def issue_list():
+        return troubleshoot.catalogue()
+
+    @app.post("/api/profiles/{pid}/diagnose")
+    def diagnose(pid: int, description: str = Form(""), issues: str = Form(""),
+                 use_ai: bool = Form(True), photos: list[UploadFile] | None = File(None)):
+        """Find what's wrong (AI from a photo, or your own pick) and plan setting changes."""
+        p = get_profile(pid)
+        manual = [i for i in (x.strip() for x in issues.split(",")) if i in troubleshoot.ISSUES]
+        if not manual and not use_ai:
+            raise HTTPException(400, "Pick at least one problem")
+        names, blobs = _save_photos(pid, photos)
+        if manual:
+            diag = {"issues": [{"id": i, "confidence": None, "evidence": "You picked this."} for i in manual],
+                    "summary": "", "by": "you"}
+        else:
+            if not blobs and not description.strip():
+                raise HTTPException(400, "Add a photo or describe the problem")
+            if not ai.ready():
+                raise HTTPException(409, "The AI isn't running. Start it in the AI tab, or pick the problem yourself.")
+            try:
+                diag = troubleshoot.diagnose_with_ai(ai.chat, description, blobs, p.get("material"), p["settings"])
+            except Exception as e:
+                raise HTTPException(502, f"AI step failed: {e}")
+            diag["by"] = "ai"
+        ids = [i["id"] for i in diag["issues"]]
+        changes = troubleshoot.plan_changes(ids, p["settings"], printer_dict(p.get("printer_id")))
+        sid = db.insert("troubleshoots", {"profile_id": pid, "description": description.strip()[:1000],
+                                          "photos": names, "diagnosis": diag, "changes": changes,
+                                          "status": "diagnosed", "updated": time.time()})
+        return _session_view(db.one("SELECT * FROM troubleshoots WHERE id = ?", (sid,)))
+
+    @app.post("/api/troubleshoots/{sid}/trial")
+    def make_trial(sid: int):
+        """Copy the profile with the suggested changes, to print and compare."""
+        sess = db.one("SELECT * FROM troubleshoots WHERE id = ?", (sid,))
+        if not sess:
+            raise HTTPException(404, "Not found")
+        if not sess["changes"]:
+            raise HTTPException(400, "There are no setting changes to try for this problem")
+        if sess.get("trial_profile_id") and db.one("SELECT id FROM profiles WHERE id = ?", (sess["trial_profile_id"],)):
+            return profile_detail(sess["trial_profile_id"])
+        p = get_profile(sess["profile_id"])
+        settings, sources = dict(p["settings"]), dict(p["sources"])
+        for c in sess["changes"]:
+            settings[c["key"]] = c["new"]
+            sources[c["key"]] = "manual"
+        first = (sess["diagnosis"].get("issues") or [{}])[0].get("id", "fix")
+        label = troubleshoot.ISSUES.get(first, {}).get("title", "fix").split(" /")[0].lower()
+        now = time.time()
+        tid = db.insert("profiles", {
+            "filament_id": p["filament_id"], "printer_id": p["printer_id"], "trial_of": p["id"],
+            "name": f"{p['name']} (trial: {label})", "material": p["material"], "inherits": p["inherits"],
+            "settings": settings, "sources": sources,
+            "notes": [f"Trial copy of '{p['name']}' to fix: {label}. Print with it, then say if it's better."],
+            "created": now, "updated": now,
+        })
+        db.save_profile_version(tid, "Trial created: " + ", ".join(f"{c['key']} {c['old']} -> {c['new']}"
+                                                                    for c in sess["changes"]))
+        db.update("troubleshoots", sid, {"trial_profile_id": tid, "status": "trial", "updated": now})
+        return profile_detail(tid)
+
+    class TrialResult(BaseModel):
+        result: str  # better | not_better | keep
+
+    @app.post("/api/profiles/{tid}/trial/result")
+    def trial_result(tid: int, body: TrialResult):
+        """better: copy the changes into the original (proven in a print) and remove the trial.
+        not_better: remove the trial. keep: turn the trial into a normal profile."""
+        t = get_profile(tid)
+        if not t.get("trial_of"):
+            raise HTTPException(400, "That isn't a trial profile")
+        sess = db.one("SELECT * FROM troubleshoots WHERE trial_profile_id = ? ORDER BY id DESC LIMIT 1", (tid,))
+        orig = db.one("SELECT * FROM profiles WHERE id = ?", (t["trial_of"],))
+        now = time.time()
+        if body.result == "better":
+            if not orig:
+                raise HTTPException(400, "The original profile was deleted; choose 'keep' instead")
+            settings, sources = dict(orig["settings"]), dict(orig["sources"])
+            keys = [c["key"] for c in (sess or {}).get("changes", [])] or \
+                   [k for k, v in t["settings"].items() if orig["settings"].get(k) != v]
+            for k in keys:
+                if k in t["settings"]:
+                    settings[k] = t["settings"][k]
+                    sources[k] = "tested"
+            db.set_profile_settings(orig["id"], settings, sources, "Fix confirmed in a print: " + ", ".join(keys))
+            db.delete("profiles", tid)
+            if sess:
+                db.update("troubleshoots", sess["id"], {"status": "fixed", "updated": now})
+            return profile_detail(orig["id"])
+        if body.result == "not_better":
+            db.delete("profiles", tid)
+            if sess:
+                db.update("troubleshoots", sess["id"], {"status": "not_better", "updated": now})
+            return profile_detail(orig["id"]) if orig else {"ok": True}
+        if body.result == "keep":
+            db.update("profiles", tid, {"trial_of": None, "name": t["name"].replace(" (trial: ", " (").strip(),
+                                        "updated": now})
+            if sess:
+                db.update("troubleshoots", sess["id"], {"status": "kept", "updated": now})
+            return profile_detail(tid)
+        raise HTTPException(400, "result must be better, not_better or keep")
 
     @app.post("/api/profiles/{pid}/rebuild")
     def rebuild_profile(pid: int):
@@ -849,6 +985,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         safety.write_text("\n".join(db.conn.iterdump()), encoding="utf-8")
         src.backup(db.conn)
+        db.conn.executescript(SCHEMA_SQL)
+        db._migrate()
         src.close()
         for name in z.namelist():
             if name.startswith("photos/") and Path(name).suffix.lower() in PHOTO_EXT:

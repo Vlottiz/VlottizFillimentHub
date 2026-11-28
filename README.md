@@ -65,6 +65,16 @@ Click **Download VlottizFF bundle for Orca** on the Profiles page (or in **Orca 
 
 To update, download a new bundle and import it the same way: it has the same id, so it replaces the old one. Orca treats bundle presets as read-only; make changes in this app and re-import.
 
+## Fixing print problems
+
+On a profile, click **Fix a print problem**. Add a photo and a sentence or two (or pick the problem from the list yourself).
+
+- **The AI only diagnoses.** It picks from a fixed list of common problems (stringing, under-extrusion, warping, bulging corners…) and says how sure it is and what it saw. It never invents settings.
+- **The app suggests the changes**: small, well-known steps for that problem, kept within your filament's temperature range and your printer's limits, at most two at a time so you can tell what helped. Problems that aren't caused by the filament (like ringing) get tips instead.
+- **Auto-tweak** makes a **trial copy** of the profile with the changes; your original isn't touched. Print with it, then click **It's better** (copies the changes into the original, marked "Proven in a print"), **Not better** (deletes the trial), or **Keep as its own profile**.
+
+Every report, with its photos, is kept under **Print problems** on the profile.
+
 ## QR swatches
 
 On a profile, click **Print QR swatch** to download a `.3mf` plate (60 × 60 × 5 mm by default) with a QR code on top. Scanning it with a phone opens a page showing the filament's settings, with buttons to **save or send** the `.json` or download the **VlottizFF bundle**. The whole profile is packed into the QR link itself, so it works anywhere, even with your PC off.

@@ -160,3 +160,11 @@ input.ai-unverified, select.ai-unverified { box-shadow: 0 0 0 2px var(--warn); }
 .qr-wrap { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 .qr-img { width: 180px; max-width: 100%; background: #fff; border-radius: 8px; padding: 6px; }
 .qr-img svg { width: 100%; height: auto; display: block; }
+
+.tag.trial { background: var(--warn); color: #fff; }
+.trial-banner { border-left: 3px solid var(--warn); }
+.changes td:first-child { width: auto; }
+.nowrap { white-space: nowrap; }
+.opt { display: flex; gap: 8px; align-items: flex-start; color: var(--text); font-size: 14px; margin: 4px 0; }
+.opt input { margin-top: 3px; }
+.issue-pick { max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin-top: 8px; }
