@@ -83,9 +83,13 @@ On a profile, click **Fix a print problem**. Add a photo and a sentence or two (
 
 - **The AI only diagnoses.** It picks from a fixed list of common problems (stringing, under-extrusion, warping, bulging corners…) and says how sure it is and what it saw. It never invents settings.
 - **The app suggests the changes**: small, well-known steps for that problem, kept within your filament's temperature range and your printer's limits, at most two at a time so you can tell what helped. Problems that aren't caused by the filament (like ringing) get tips instead.
-- **Auto-tweak** makes a **trial copy** of the profile with the changes; your original isn't touched. Print with it, then click **It's better** (copies the changes into the original, marked "Proven in a print"), **Not better** (deletes the trial), or **Keep as its own profile**.
+- **You get the final say.** What you write counts strongly ("wavy lines" points at VFA, "strings" at stringing), weak guesses are dropped, and you can untick anything wrong or add a problem it missed before anything is changed.
+- **Print settings too.** For problems that aren't the filament (VFA, ringing) it tells you which Orca print setting to change; for VFA it uses the speed your VFA calibration found smoothest.
+- **Make a trial profile** to try the changes as a copy; your original isn't touched. Print with it, then click **It's better** (copies the changes into the original, marked "Proven in a print"), **Not better** (deletes the trial), or **Keep as its own profile**.
 
 Every report, with its photos, is kept under **Print problems** on the profile.
+
+Photos are shrunk to 1024 px before the AI sees them, and the AI's context (how much it can take in at once) defaults to 16k, enough for up to 4 photos. You can change it in the AI tab.
 
 ## QR swatches
 

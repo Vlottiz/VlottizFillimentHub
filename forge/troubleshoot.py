@@ -26,7 +26,8 @@ ISSUES: dict[str, dict] = {
         "looks_like": "thin hairs or webs of plastic between separate parts of the print",
         "changes": [
             ("nozzle_temperature", "add", -5, "Cooler plastic oozes less while travelling."),
-            ("filament_retraction_length", "add", 0.2, "Pulls the filament back further before travel moves."),
+            ("filament_retraction_length", "add", 0.2, "Pulls the filament back further before travel moves.",
+             {"floor": 0.6}),
         ],
         "tips": ["Wet filament strings a lot: dry it (see the material's drying temperature).",
                  "Run the Retraction calibration to find the exact value."],
@@ -111,7 +112,7 @@ ISSUES: dict[str, dict] = {
         "looks_like": "small bumps or pimples on the outside walls, often in a line (the seam)",
         "changes": [
             ("nozzle_temperature", "add", -5, "Less ooze when the nozzle stops and starts."),
-            ("filament_retraction_length", "add", 0.1, "Slightly more retraction at the seam."),
+            ("filament_retraction_length", "add", 0.1, "Slightly more retraction at the seam.", {"floor": 0.5}),
         ],
         "tips": ["Try 'Aligned' or 'Back' seam position and enable 'Wipe' in the process settings."],
     },
@@ -126,11 +127,36 @@ ISSUES: dict[str, dict] = {
     },
     "ringing": {
         "title": "Ringing / ghosting",
-        "looks_like": "ripples or echoes of features repeated across a wall after corners or holes",
+        "looks_like": "ripples or faint echoes that start right after a corner, hole or letter and fade out along the wall",
         "changes": [],
-        "tips": ["This comes from speed and acceleration, not the filament: lower outer wall acceleration in the "
-                 "process settings, and make sure input shaping is calibrated on the printer.",
-                 "Check belts are tight."],
+        "process": [("Outer wall acceleration", "2000–3000 mm/s²", "Gentler direction changes shake the toolhead less.")],
+        "tips": ["Make sure input shaping is calibrated on the printer.", "Check the belts are tight."],
+    },
+    "vfa": {
+        "title": "VFA (fine vertical ripples)",
+        "looks_like": "fine, evenly spaced vertical ripples or a corduroy / wavy texture across smooth walls, "
+                      "most visible on curved shiny surfaces under side light",
+        "changes": [],
+        "process": [("Outer wall speed", "{vfa_speed}", "Prints walls at the speed your VFA test found smoothest.")],
+        "tips": ["Vertical fine artifacts come from the motors at certain speeds, not the filament.",
+                 "Run the VFA calibration if you haven't: the smoothest band gives the outer wall speed to use."],
+    },
+    "z_banding": {
+        "title": "Z-banding (horizontal bands)",
+        "looks_like": "horizontal bands or ridges repeating at regular heights all the way up the print",
+        "changes": [],
+        "process": [],
+        "tips": ["Usually mechanical: check the Z axis / lead screws are clean and not binding.",
+                 "Uneven filament diameter or damp filament can also band: dry the spool.",
+                 "Use a layer height that's a multiple of the Z step (0.2 mm is safe)."],
+    },
+    "layer_line": {
+        "title": "One line or band at a single height",
+        "looks_like": "a single visible line, ridge or change in shine at one height, e.g. where the deck or cabin starts",
+        "changes": [("slow_down_layer_time", "add", 4, "Keeps small layers from printing much faster than big ones.")],
+        "process": [],
+        "tips": ["Speed or cooling changes at that height (small layers print faster). Mostly cosmetic.",
+                 "Setting one fixed outer wall speed makes it even."],
     },
     "wet_filament": {
         "title": "Wet filament",
@@ -148,7 +174,28 @@ LIMITS = {
     "filament_flow_ratio": (0.85, 1.15), "filament_max_volumetric_speed": (1, 60),
     "pressure_advance": (0, 0.2), "filament_retraction_length": (0, 4),
     "fan_max_speed": (0, 100), "fan_min_speed": (0, 100), "overhang_fan_speed": (0, 100),
+    "slow_down_layer_time": (2, 20),
 }
+
+# Words in your description that point at a problem. What you say counts
+# strongly: you can see the print, the model only sees a photo.
+KEYWORDS = {
+    "stringing": r"string|hair|web|wisp|cobweb|ooz",
+    "vfa": r"\bvfa\b|wavy|wave|ripple|corduroy|vertical (line|stripe)|salmon",
+    "ringing": r"ringing|ghost|echo",
+    "z_banding": r"band|horizontal line|z.?wobble|layer lines? (stand out|visible)",
+    "warping": r"warp|lift|curl(ing)? (up|corner)|corner.*(lift|up)",
+    "poor_adhesion": r"(won'?t|doesn'?t|not) stick|came off|detach|adhesion",
+    "sagging_overhangs": r"droop|sag|overhang|bridg",
+    "blobs_zits": r"blob|zit|pimple|seam",
+    "under_extrusion": r"gap|under.?extru|thin wall|missing|spongy|holes? in",
+    "over_extrusion": r"over.?extru|too much|bulg(e|ing) wall|rough top",
+    "layer_separation": r"split|crack|delaminat|weak layer|snap",
+    "elephant_foot": r"elephant|bottom.*(wide|bulge|flare)",
+    "bulging_corners": r"corner.*(bulge|blob|stick out)",
+    "wet_filament": r"pop|hiss|crackl|bubbl|steam",
+}
+MIN_CONFIDENCE = 0.45
 
 # What a setting starts from when the profile doesn't set it (the printer's default).
 UNSET_DEFAULTS = {"filament_retraction_length": 0.8, "pressure_advance": 0.04}
@@ -172,7 +219,8 @@ def plan_changes(issue_ids: list[str], settings: dict, printer: dict | None = No
     printer = printer or {}
     out: dict[str, dict] = {}
     for iid in issue_ids:
-        for key, how, amount, why in ISSUES.get(iid, {}).get("changes", []):
+        for key, how, amount, why, *extra in ISSUES.get(iid, {}).get("changes", []):
+            opts = extra[0] if extra else {}
             if len(out) >= MAX_CHANGES:
                 break
             if key in out:
@@ -183,6 +231,8 @@ def plan_changes(issue_ids: list[str], settings: dict, printer: dict | None = No
                 continue
             new = {"add": base + amount, "mul": base * amount, "set": amount,
                    "min_set": max(base, amount)}[how]
+            if "floor" in opts and new < opts["floor"]:
+                new = opts["floor"]  # e.g. retraction that's almost zero jumps to a sensible value
             lo, hi = LIMITS.get(key, (float("-inf"), float("inf")))
             if "nozzle_temperature" in key:
                 lo = max(lo, settings.get("nozzle_temperature_range_low") or lo)
@@ -193,7 +243,9 @@ def plan_changes(issue_ids: list[str], settings: dict, printer: dict | None = No
             new = _round(key, min(max(new, lo), hi))
             if new == old:
                 continue  # already at the limit, nothing to change
-            out[key] = {"key": key, "old": old, "new": new, "why": why, "issue": iid}
+            why_text = why if not ("floor" in opts and new == opts["floor"]) else \
+                f"{why} It was almost zero, so this sets a normal starting value."
+            out[key] = {"key": key, "old": old, "new": new, "why": why_text, "issue": iid}
             if key == "pressure_advance":
                 out["enable_pressure_advance"] = {"key": "enable_pressure_advance",
                                                   "old": settings.get("enable_pressure_advance"), "new": 1,
@@ -207,11 +259,18 @@ def plan_changes(issue_ids: list[str], settings: dict, printer: dict | None = No
 # ----------------------------------------------------------------- the AI
 SYSTEM_PROMPT = (
     "You are an expert at diagnosing FDM 3D-printing problems from photos.\n"
-    "Pick the problems you can actually see (or that the user describes) from the list you are given, "
-    "using only those ids. Most photos show one main problem; list at most 3, most likely first.\n"
-    "confidence is 0 to 1. In 'evidence' say briefly what in the photo or description shows it.\n"
-    "If the photo is unclear or shows no problem, return an empty list and say so in summary.\n"
-    "Don't suggest numeric setting values; the app does that."
+    "Rules:\n"
+    "- The user's own description is the most important evidence: they can see and touch the print.\n"
+    "- Only report a problem you can clearly see in the photo or that the user describes. Don't guess.\n"
+    "- Silk and shiny filaments reflect light: bright streaks, glare and colour shifts are NOT defects.\n"
+    "- Don't confuse: fine vertical ripples on smooth walls = vfa (not ringing unless they start at a corner "
+    "or feature and fade out); hairs across gaps = stringing; corners lifted off the BED = warping (a part held "
+    "in a hand can't show warping unless its bottom is visibly bent); drooping undersides of overhangs = "
+    "sagging_overhangs.\n"
+    "- Usually there is one main problem; list at most 3, most likely first, using only the given ids.\n"
+    "- confidence is 0 to 1. In 'evidence' say exactly what you see and where.\n"
+    "- If nothing is clearly wrong, return an empty list and say so in summary.\n"
+    "- Don't suggest numeric setting values; the app does that."
 )
 
 
@@ -235,10 +294,10 @@ def user_prompt(description: str, material: str | None, settings: dict) -> str:
     keys = ("nozzle_temperature", "textured_plate_temp", "filament_flow_ratio", "pressure_advance",
             "filament_max_volumetric_speed", "filament_retraction_length", "fan_max_speed")
     current = ", ".join(f"{k}={settings[k]}" for k in keys if k in settings)
-    return (f"Problems to choose from:\n{options}\n\n"
+    return (f"What the user says about the print: \"{description.strip() or '(nothing)'}\"\n\n"
+            f"Problems to choose from:\n{options}\n\n"
             f"Material: {material or 'unknown'}. Current settings: {current or 'unknown'}.\n"
-            f"What the user says: \"{description.strip() or '(nothing)'}\"\n"
-            "Look at the attached photo(s) and diagnose.")
+            "Look at the attached photo(s) and diagnose, giving the user's description the most weight.")
 
 
 def diagnose_with_ai(chat, description: str, images: list[bytes], material: str | None, settings: dict) -> dict:
@@ -266,3 +325,41 @@ def diagnose_with_ai(chat, description: str, images: list[bytes], material: str 
         issues.append({"id": iid, "confidence": round(conf, 2), "evidence": str(it.get("evidence", ""))[:300]})
     issues.sort(key=lambda i: -i["confidence"])
     return {"issues": issues[:3], "summary": str(raw.get("summary", ""))[:600]}
+
+
+def process_suggestions(issue_ids: list[str], context: dict | None = None) -> list[dict]:
+    """Print (process) settings to change in Orca; the app can't change these itself."""
+    context = context or {}
+    out = []
+    for iid in issue_ids:
+        for setting, value, why in ISSUES.get(iid, {}).get("process", []):
+            if "{vfa_speed}" in value:
+                v = context.get("vfa_speed")
+                value = f"{int(round(v))} mm/s (your VFA test)" if v else \
+                    "the speed of your VFA test's smoothest band (run the VFA calibration)"
+            out.append({"setting": setting, "value": value, "why": why, "issue": iid})
+    return out
+
+
+def keyword_issues(description: str) -> list[str]:
+    text = (description or "").lower()
+    return [iid for iid, pat in KEYWORDS.items() if re.search(pat, text)]
+
+
+def combine(ai_issues: list[dict], description: str) -> list[dict]:
+    """Merge the AI's guesses with what the user wrote.
+
+    Problems the user names are boosted (or added); low-confidence guesses
+    the user didn't mention are dropped. At most 3, most likely first.
+    """
+    said = keyword_issues(description)
+    by_id = {i["id"]: dict(i) for i in ai_issues}
+    for iid in said:
+        if iid in by_id:
+            by_id[iid]["confidence"] = round(min(1.0, by_id[iid]["confidence"] + 0.3), 2)
+            by_id[iid]["evidence"] = (by_id[iid]["evidence"] + " (you mentioned it too)").strip()
+        else:
+            by_id[iid] = {"id": iid, "confidence": 0.6, "evidence": "From your description."}
+    kept = [i for i in by_id.values() if i["confidence"] >= MIN_CONFIDENCE or i["id"] in said]
+    kept.sort(key=lambda i: -i["confidence"])
+    return kept[:3]

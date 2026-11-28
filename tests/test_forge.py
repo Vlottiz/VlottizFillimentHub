@@ -524,3 +524,9 @@ def test_data_dir_is_outside_the_app_and_old_data_moves(tmp_path, monkeypatch):
     assert (new / "forge.db").read_text() == "db"
     monkeypatch.setenv("FORGE_DATA_DIR", str(tmp_path / "custom"))
     assert paths.default_data_dir() == tmp_path / "custom"
+
+
+def test_retraction_warns_when_almost_zero():
+    r = calibration.compute("retraction", {"start": "0", "step": "0.1", "height": "0.1"}, {})
+    assert r["new"] == 0.01 and "height box" in r["extra"]["_warning"]
+    assert "_warning" not in calibration.compute("retraction", {"height": "7"}, {})["extra"]

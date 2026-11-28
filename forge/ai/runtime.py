@@ -50,7 +50,10 @@ DEFAULT_SETTINGS = {
     "model": DEFAULT_MODEL,
     "external_url": "http://127.0.0.1:11434",
     "port": DEFAULT_PORT,
+    "context": 16384,       # tokens the model can see at once; photos use most of it
 }
+
+CONTEXT_CHOICES = (8192, 16384, 32768)
 
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 
@@ -486,7 +489,8 @@ class OllamaManager:
     # ---- inference
     def chat(self, messages: list[dict], schema: dict | None = None, timeout: float = 300) -> str:
         body = {"model": self.settings["model"], "messages": messages, "stream": False,
-                "options": {"temperature": 0, "num_ctx": 8192}, "keep_alive": "10m"}
+                "options": {"temperature": 0, "num_ctx": int(self.settings.get("context") or 16384)},
+                "keep_alive": "10m"}
         if schema:
             body["format"] = schema
         r = httpx.post(self.url + "/api/chat", json=body, timeout=httpx.Timeout(30, read=timeout))
