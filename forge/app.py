@@ -106,14 +106,19 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
     def orca_group() -> dict:
         return {**orca.DEFAULT_GROUP, **(db.get_setting("orca_group") or {})}
 
-    def preset_for(profile: dict) -> dict:
-        """The Orca preset for a profile, named and grouped under your group (VlottizFF)."""
+    def preset_for(profile: dict, in_bundle: bool = False) -> dict:
+        """The Orca preset for a profile, named and grouped under your group (VlottizFF).
+
+        Inside a bundle the bundle itself carries the group name, so the
+        preset name isn't prefixed again.
+        """
         group = orca_group()
         settings = dict(profile["settings"])
         if group.get("as_vendor") and group.get("name", "").strip():
             settings["filament_vendor"] = group["name"].strip()
+        name = profile["name"] if in_bundle else orca.group_name(profile["name"], group)
         return orca.to_preset(
-            orca.group_name(profile["name"], group), settings, material=profile.get("material"),
+            name, settings, material=profile.get("material"),
             inherits=profile.get("inherits"), compatible_printers=compat_for(profile),
         )
 
@@ -408,6 +413,21 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         db.insert("exports", {"profile_id": pid, "preset_name": p["name"],
                               "content": json.dumps(preset, indent=4), "target": str(path)})
         return {"path": str(path), "message": "Installed. Restart OrcaSlicer to see it."}
+
+    @app.get("/api/export-bundle")
+    def export_bundle():
+        """All profiles as one Orca bundle, shown under your group name in Orca."""
+        profiles = db.all("SELECT * FROM profiles ORDER BY name")
+        if not profiles:
+            raise HTTPException(400, "There are no profiles to export yet")
+        name = orca_group().get("name", "").strip() or "Filament Forge"
+        data = orca.make_bundle([preset_for(p, in_bundle=True) for p in profiles], name)
+        for p in profiles:
+            db.insert("exports", {"profile_id": p["id"], "preset_name": p["name"],
+                                  "content": json.dumps(preset_for(p, in_bundle=True)), "target": f"bundle {name}"})
+        fname = orca.safe_filename(name) + orca.BUNDLE_EXT
+        return Response(data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
     @app.get("/api/export-all")
     def export_all():

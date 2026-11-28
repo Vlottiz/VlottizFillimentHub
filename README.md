@@ -30,6 +30,12 @@ python -m venv .venv
 .venv/bin/python run.py
 ```
 
+## Updating
+
+1. Get the new version: **Code → Download ZIP** on GitHub and unzip it over your old copy (or `git pull` if you cloned it).
+2. **Keep your `data` folder.** It holds your filaments, profiles, history, photos and the downloaded AI.
+3. Run `start.bat` / `start.sh` as usual. It installs any new packages automatically when they've changed.
+
 ## Typical workflow
 
 1. **Printers:** a Snapmaker U1 is already set up using the speeds and sizes from Orca's own U1 profile. Click **Import printer.cfg** and pick your config files (download them from the printer's Fluidd/Mainsail config page). That fills in temperature limits and nozzle size.
@@ -52,6 +58,12 @@ Importing a preset that's already in the app updates that profile (with a histor
 - **By hand:** in Orca, **File → Import → Import Configs…** and pick the `.json` file.
 
 Then pick it in the filament dropdown in the Prepare tab; it's under the user presets. If it isn't listed, make sure the Snapmaker U1 is the selected printer.
+
+## VlottizFF bundle (recommended way to get presets into Orca)
+
+Click **Download VlottizFF bundle for Orca** on the Profiles page (or in **Orca & backup**). You get one `VlottizFF.orca_filament` file with all your profiles. In Orca: **File → Import → Import Configs…** and pick it. Your filaments then appear in the filament dropdown under **Bundle presets → VlottizFF**, the same way OrcaGen does.
+
+To update, download a new bundle and import it the same way: it has the same id, so it replaces the old one. Orca treats bundle presets as read-only; make changes in this app and re-import.
 
 ## Your own group in Orca (VlottizFF)
 

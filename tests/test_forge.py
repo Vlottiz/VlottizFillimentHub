@@ -385,3 +385,36 @@ def test_install_into_logged_in_folder(client, tmp_path):
     written = json.loads((orca_root / "user" / "uuid-123" / "filament" /
                           "VlottizFF Giantarm PLA Silk Silver @Snapmaker U1.json").read_text())
     assert written["version"] and written["compatible_printers"] == ["Snapmaker U1 (0.4 nozzle)"]
+
+
+def test_vlottizff_bundle_matches_orca_format(client):
+    raw = (FIXTURES / "Giantarm PLA Silk Silver @Snapmaker U1.json").read_bytes()
+    client.post("/api/orca/import-file", files=[("files", ("g.json", raw))])
+    f = client.post("/api/filaments", json={"brand": "Acme", "name": "PETG", "material": "PETG"}).json()
+    client.post("/api/profiles", json={"filament_id": f["id"], "printer_id": 1})
+
+    r = client.get("/api/export-bundle")
+    assert r.status_code == 200
+    assert 'filename="VlottizFF.orca_filament"' in r.headers["content-disposition"]
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    manifest = json.loads(z.read("bundle_structure.json"))
+    # keys Orca's BundleMetadata::load_from_json reads
+    assert manifest["id"] == "vlottizff" and manifest["name"] == "VlottizFF"
+    assert manifest["print_presets"] == [] and manifest["printer_presets"] == []
+    assert sorted(manifest["filament_presets"]) == sorted(n for n in z.namelist() if n != "bundle_structure.json")
+    assert len(manifest["filament_presets"]) == 2
+    for fname in manifest["filament_presets"]:
+        p = json.loads(z.read(fname))
+        # what Orca's import_json_presets requires: name, a parseable version, filament_settings_id, a real parent
+        assert p["name"] and not p["name"].startswith("VlottizFF ")   # the bundle carries the group name
+        assert all(part.isdigit() for part in p["version"].split("."))
+        assert p["filament_settings_id"] == [p["name"]]
+        assert p["inherits"].endswith("@System")
+        assert p["compatible_printers"] == ["Snapmaker U1 (0.4 nozzle)"]
+        assert p["filament_vendor"] == ["VlottizFF"]
+    names = {json.loads(z.read(n))["name"] for n in manifest["filament_presets"]}
+    assert "Giantarm PLA Silk Silver @Snapmaker U1" in names
+
+
+def test_bundle_with_no_profiles(client):
+    assert client.get("/api/export-bundle").status_code == 400
