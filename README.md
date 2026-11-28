@@ -59,6 +59,12 @@ Importing a preset that's already in the app updates that profile (with a histor
 
 Then pick it in the filament dropdown in the Prepare tab; it's under the user presets. If it isn't listed, make sure the Snapmaker U1 is the selected printer.
 
+## VlottizFF bundle (recommended way to get presets into Orca)
+
+Click **Download VlottizFF bundle for Orca** on the Profiles page (or in **Orca & backup**). You get one `VlottizFF.orca_filament` file with all your profiles. In Orca: **File → Import → Import Configs…** and pick it. Your filaments then appear in the filament dropdown under **Bundle presets → VlottizFF**, the same way OrcaGen does.
+
+To update, download a new bundle and import it the same way: it has the same id, so it replaces the old one. Orca treats bundle presets as read-only; make changes in this app and re-import.
+
 ## Your own group in Orca (VlottizFF)
 
 Exported presets are grouped under **VlottizFF** by default: the preset name starts with it (`VlottizFF Giantarm PLA Silk Silver @Snapmaker U1`), so they sort together in Orca's filament list, and it's used as the vendor, which Orca uses to group presets when you add or manage filaments. The real brand stays in the app and in the name. Change or turn this off under **Orca & backup → Your group in Orca**.

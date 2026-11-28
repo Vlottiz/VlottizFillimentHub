@@ -13,11 +13,13 @@ parent for them.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import platform
 import re
 import time
+import zipfile
 from pathlib import Path
 
 # Orca's own system presets to inherit from (they exist in OrcaFilamentLibrary).
@@ -302,3 +304,46 @@ def filament_from_preset(name: str, settings: dict, group: dict | None = None) -
         "spec": spec,
         "printer_hint": printer,
     }
+
+
+# ------------------------------------------------------- preset bundles
+# Orca's "Bundle presets": a zip (.orca_filament) holding bundle_structure.json
+# plus one preset .json per filament. File > Import > Import Configs installs it
+# into user/<account>/_local/<id>/ and lists it under its own name (like OrcaGen).
+# Format taken from OrcaSlicer's PresetBundle::import_presets / BundleMetadata.
+BUNDLE_EXT = ".orca_filament"
+
+
+def bundle_id(name: str) -> str:
+    """Stable id, so importing a newer bundle replaces the old one."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "filament-forge"
+
+
+def make_bundle(presets: list[dict], name: str, author: str = "", description: str = "") -> bytes:
+    """Build an Orca filament bundle (zip bytes) from filament presets."""
+    files: dict[str, dict] = {}
+    for p in presets:
+        base = safe_filename(p["name"])
+        fname, n = base + ".json", 2
+        while fname.lower() in {f.lower() for f in files}:
+            fname, n = f"{base} ({n}).json", n + 1
+        files[fname] = p
+    now = int(time.time())
+    manifest = {
+        "id": bundle_id(name),
+        "name": name,
+        "version": time.strftime("%Y.%m.%d.%H%M", time.localtime(now)),
+        "description": description or f"{name} filament presets from Filament Forge",
+        "author": author,
+        "updated_time": now,
+        "print_presets": [],
+        "filament_presets": list(files),
+        "printer_presets": [],
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("bundle_structure.json", json.dumps(manifest, indent=4))
+        for fname, p in files.items():
+            z.writestr(fname, json.dumps(p, indent=4))
+    return buf.getvalue()

@@ -313,6 +313,9 @@ window.addEventListener("drop", guard(async (ev) => {
 
 /* ======================= PROFILES ======================= */
 async function loadProfiles() {
+  api("/api/settings/orca-group").then((g) => {
+    $("#bundle-btn").textContent = `Download ${g.name || "Filament Forge"} bundle for Orca`;
+  }).catch(() => {});
   state.profiles = await api("/api/profiles");
   const el = $("#profile-list");
   if (!state.profiles.length) {
@@ -801,7 +804,11 @@ async function renderBackup() {
           <p class="small" style="margin-top:8px">Example: <b id="group-example"></b></p>
           <p class="small muted">The real brand stays in this app and in the preset name. Changing this renames presets the next time you
           export or install them; the old copies stay in Orca until you delete them there.</p>
-          <div class="actions"><button class="primary" type="submit">Save</button></div>
+          <div class="actions"><button type="submit">Save</button>
+            <a class="btn primary" href="/api/export-bundle">Download ${esc(group.name || "Filament Forge")} bundle</a></div>
+          <p class="small muted" style="margin-top:8px"><b>To add it to Orca:</b> File → Import → Import Configs…, pick the
+          <code>.orca_filament</code> file. Your filaments then appear in the filament dropdown under <b>Bundle presets →
+          ${esc(group.name || "Filament Forge")}</b>, like OrcaGen. Import a newer bundle the same way to update it.</p>
         </form>
       </div>
       <div class="card">
