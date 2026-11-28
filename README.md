@@ -15,26 +15,38 @@ Everything runs on your computer. Nothing is uploaded anywhere, including the AI
 
 ## Run it
 
+### Windows: the .exe (easiest)
+Download **FilamentForge.exe** from the repo's **Releases** page (or from the latest run under **Actions → Build Windows exe → Artifacts**) and double-click it. A small window opens with the app's address and your browser opens the app. **Keep that window open while you use it; closing it quits the app and stops the AI.**
+
+Windows may warn the first time ("Windows protected your PC") because the exe isn't signed: click **More info → Run anyway**.
+
+### From the source code (any OS)
 You need Python 3.10 or newer ([python.org](https://www.python.org/downloads/); on Windows tick "Add Python to PATH").
 
 - **Windows:** double-click `start.bat`
 - **macOS / Linux:** run `./start.sh`
 
-The first run sets up a private `.venv` folder and installs three packages. The app then opens at <http://127.0.0.1:8765>. Your data is saved in the `data/` folder.
+It sets up a private `.venv` folder and installs what it needs, then opens <http://127.0.0.1:8765>.
 
-Manual start:
+## Your data (and the AI) survive updates
 
-```bash
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt   # Windows: .venv\Scripts\pip ...
-.venv/bin/python run.py
-```
+Everything you make (filament log, profiles, history, photos, backups) **and the downloaded AI** is kept in one folder outside the app:
+
+| OS | Folder |
+|---|---|
+| Windows | `%LOCALAPPDATA%\FilamentForge` |
+| macOS | `~/Library/Application Support/FilamentForge` |
+| Linux | `~/.local/share/filament-forge` |
+
+So updating never loses anything or re-downloads the AI. If you used an older version that kept a `data` folder inside the app folder, it's moved there automatically the first time you start the new version. (Set `FORGE_DATA_DIR` to use a different folder.)
 
 ## Updating
 
-1. Get the new version: **Code → Download ZIP** on GitHub and unzip it over your old copy (or `git pull` if you cloned it).
-2. **Keep your `data` folder.** It holds your filaments, profiles, history, photos and the downloaded AI.
-3. Run `start.bat` / `start.sh` as usual. It installs any new packages automatically when they've changed.
+- **.exe:** download the new `FilamentForge.exe` and replace the old one.
+- **Source:** download the new ZIP and unzip it over the old folder (or `git pull`), then run `start.bat` / `start.sh` as usual; new packages install automatically.
+
+### Making a release (for the repo owner)
+Every push to `main` builds the exe (Actions tab). To publish it on the Releases page, create a tag: on GitHub, **Releases → Draft a new release → Choose a tag → type e.g. `v1.0.0` → Create new tag → Publish**. The workflow attaches `FilamentForge.exe` to that release.
 
 ## Typical workflow
 

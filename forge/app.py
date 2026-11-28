@@ -17,14 +17,14 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import calibration, klipper, materials, orca, swatch, troubleshoot, tuning
+from . import calibration, klipper, materials, orca, paths, swatch, troubleshoot, tuning
 from .ai import extract as ai_extract
 from .ai.runtime import OllamaManager
 from .db import DB, SCHEMA as SCHEMA_SQL
 from .fields import FIELDS
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("FORGE_DATA_DIR", ROOT.parent / "data"))
+DATA_DIR = paths.default_data_dir()
 PHOTO_DIR = DATA_DIR / "photos"
 MAX_UPLOAD = 20_000_000
 PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
@@ -135,6 +135,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                        for k, l, u, g, s in FIELDS],
             "tests": calibration.tests_for_ui(),
             "orca_config_dir": str(root) if root else None,
+            "data_dir": str(DATA_DIR),
             "orca_config_exists": bool(root and root.is_dir()),
             "orca_filament_dirs": [str(d) for d in orca.install_dirs()],
             "orca_active_dir": str(orca.active_user_dir() or ""),
