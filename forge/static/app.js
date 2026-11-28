@@ -292,6 +292,16 @@ async function importPresets(fileList) {
 }
 
 $("#import-json").onclick = () => $("#import-json-file").click();
+$("#import-link").onclick = () => openDialog(`<h2>Import from a QR swatch</h2>
+  <p class="small muted">Scan the swatch with your phone's camera, copy the link it shows (long-press → Copy), send it to this
+    computer (e.g. email it to yourself) and paste it here. This works even if the scan page isn't online.</p>
+  <textarea name="link" rows="4" required placeholder="https://vlottiz.github.io/VlottizFillimentHub/#1*..."></textarea>
+  <div class="actions"><button class="primary" value="go">Import</button><button value="cancel" formnovalidate>Cancel</button></div>`,
+  async (fd) => {
+    const p = await api("/api/import-swatch-link", { json: { link: fd.get("link") } });
+    toast(`Imported ${p.name}: ${p.import.new_profile ? (p.import.new_filament ? "new filament + profile" : "new profile") : "updated"}`);
+    state.current = p.id; show("profiles");
+  });
 $("#import-json-file").onchange = guard(async (ev) => { await importPresets(ev.target.files); ev.target.value = ""; });
 
 // Drag .json files anywhere onto the app to import them.
@@ -495,6 +505,7 @@ async function qrDialog(p) {
           <div><label>Size (mm)</label><input name="size" type="number" min="40" max="120" step="5" value="60"></div>
           <div><label>Thickness (mm)</label><input name="thickness" type="number" min="2" max="10" step="0.5" value="5"></div>
         </div>
+        <div><label>Text printed under the code (blank for none)</label><input name="label" maxlength="80"></div>
         <p class="small" id="qr-info"></p>
         <p class="small muted" id="qr-style-tip"></p>
       </div>
@@ -509,7 +520,7 @@ async function qrDialog(p) {
       <div class="actions"><button type="button" id="qr-base-save">Save address</button></div>
     </details>`, () => {});
   const tips = {
-    two_colour: "In Orca, the plate has two parts. Give “QR code (second colour)” a dark filament in another toolhead (it's the top 0.6 mm).",
+    two_colour: "Important: in Orca, give the “QR code and name (second colour)” part a dark filament in another toolhead (it's the top 0.6 mm). If both parts use the same filament, the code is invisible.",
     hollow: "One colour: the dark squares are cut almost all the way through, so their shadows make the code. Scan in even light; a lighter filament works best.",
   };
   const refresh = guard(async () => {
@@ -517,11 +528,13 @@ async function qrDialog(p) {
     style = form.elements.style.value;
     thickness = Number(form.elements.thickness.value) || 5;
     const q = await api(`/api/profiles/${p.id}/qr?size=${size}`);
+    if (form.elements.label.dataset.init !== "1") { form.elements.label.value = q.label; form.elements.label.dataset.init = "1"; }
     $("#qr-img", form).innerHTML = q.svg;
     $("#qr-info", form).innerHTML = `${q.modules}×${q.modules} QR, <b>${q.module_mm} mm</b> per square
       ${q.module_mm < 0.8 ? `<span style="color:var(--warn)">: small for a 0.4 nozzle; try ${Math.ceil(0.85 * (q.modules + 4) / 5) * 5} mm</span>` : ""}`;
     $("#qr-style-tip", form).textContent = tips[style];
-    $("#qr-dl", form).href = `/api/profiles/${p.id}/swatch.3mf?style=${style}&size=${size}&thickness=${thickness}`;
+    $("#qr-dl", form).href = `/api/profiles/${p.id}/swatch.3mf?style=${style}&size=${size}&thickness=${thickness}` +
+      `&label=${encodeURIComponent(form.elements.label.value)}`;
     $("#qr-open", form).href = q.url;
   });
   form.oninput = (ev) => { if (ev.target.id !== "qr-base") refresh(); };

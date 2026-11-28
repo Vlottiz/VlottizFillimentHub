@@ -622,16 +622,19 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             raise HTTPException(400, "Too much data for a QR code")
         n = len(matrix)
         return {"url": url, "chars": len(url), "modules": n, "svg": swatch.qr_svg(url),
+                "label": swatch.label_text(get_profile(pid)["name"]),
                 "module_mm": round(size / (n + 2 * swatch.QUIET), 2)}
 
     @app.get("/api/profiles/{pid}/swatch.3mf")
-    def profile_swatch(pid: int, style: str = "two_colour", size: float = 60, thickness: float = 5):
+    def profile_swatch(pid: int, style: str = "two_colour", size: float = 60, thickness: float = 5,
+                       label: str | None = None):
         if style not in ("two_colour", "hollow"):
             raise HTTPException(400, "style must be two_colour or hollow")
         if not (30 <= size <= 150 and 2 <= thickness <= 15):
             raise HTTPException(400, "Size must be 30-150 mm and thickness 2-15 mm")
         p = get_profile(pid)
-        parts, _cell = swatch.build_parts(swatch.qr_matrix(qr_link(p)), size, thickness, style)
+        text = swatch.label_text(p["name"]) if label is None else label[:80]
+        parts, _cell = swatch.build_parts(swatch.qr_matrix(qr_link(p)), size, thickness, style, text)
         data = swatch.to_3mf(parts, f"{p['name']} QR swatch")
         fname = orca.safe_filename(f"{p['name']} QR swatch") + ".3mf"
         return Response(data, media_type="model/3mf",
@@ -932,6 +935,25 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         if not results:
             raise HTTPException(400, "No .json presets found")
         return {"results": results}
+
+    class SwatchLinkIn(BaseModel):
+        link: str
+
+    @app.post("/api/import-swatch-link")
+    def import_swatch_link(body: SwatchLinkIn):
+        """Import a profile from a QR swatch link (what a phone shows when it scans one)."""
+        text = body.link.strip()
+        frag = text.split("#", 1)[1] if "#" in text else text
+        try:
+            d = swatch.decode(frag)
+        except ValueError as e:
+            raise HTTPException(400, f"{e}. Copy the whole link your phone shows after scanning.")
+        preset = orca.to_preset(
+            f"{d['group']} {d['name']}" if d["group"] else d["name"], d["settings"], inherits=d["inherits"],
+            compatible_printers=[d["printer"]] if d["printer"] else None,
+            notes=orca.notes_for(d["settings"], d["sources"]))
+        r = _import_preset(preset, None)
+        return {**profile_detail(r["profile_id"]), "import": r}
 
     # ------------------------------------------------- your group in Orca
     class GroupIn(BaseModel):

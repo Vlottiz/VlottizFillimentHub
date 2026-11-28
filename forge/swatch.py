@@ -25,7 +25,9 @@ from urllib.parse import quote, unquote_plus
 from . import orca
 
 DEFAULT_BASE_URL = "https://vlottiz.github.io/VlottizFillimentHub/"
-QUIET = 2          # light border around the code, in modules
+QUIET = 3          # light border around the code, in modules (phones find it more easily)
+LABEL_PX = 0.25    # mm per pixel for the printed name
+TEXT_DEPTH = 1.0   # hollow style: how deep the name is cut (mm)
 INLAY_DEPTH = 0.6  # two-colour: thickness of the coloured QR layer (mm)
 HOLLOW_FLOOR = 0.8  # hollow: plastic left under the dark squares (mm)
 
@@ -81,7 +83,7 @@ def qr_svg(url: str) -> str:
 
 
 # ------------------------------------------------------------------- mesh
-class _Mesh:
+class _Mesh:  # noqa: D101
     def __init__(self):
         self.verts: list[tuple[float, float, float]] = []
         self.index: dict[tuple, int] = {}
@@ -101,13 +103,14 @@ class _Mesh:
         self.tris += [(a, b, c), (a, c, d)]
 
 
-def _heightfield(heights: list[list[float]], cell: float, base: float = 0.0) -> _Mesh:
+def _heightfield(heights: list[list[float]], cell: float, base: float = 0.0,
+                 ox: float = 0.0, oy: float = 0.0, m: "_Mesh | None" = None) -> _Mesh:
     """Solid from per-cell top heights (0 = empty), bottom at `base`.
 
     Built on a shared vertex grid so neighbouring cells share edges and the
     result is a closed surface.
     """
-    m = _Mesh()
+    m = m or _Mesh()
     rows, cols = len(heights), len(heights[0])
 
     def h(r, c):
@@ -119,8 +122,8 @@ def _heightfield(heights: list[list[float]], cell: float, base: float = 0.0) -> 
             if top <= base:
                 continue
             # rows go down the code; flip so row 0 is at the back (max y)
-            x0, x1 = c * cell, (c + 1) * cell
-            y1, y0 = (rows - r) * cell, (rows - r - 1) * cell
+            x0, x1 = ox + c * cell, ox + (c + 1) * cell
+            y1, y0 = oy + (rows - r) * cell, oy + (rows - r - 1) * cell
             m.quad((x0, y0, top), (x1, y0, top), (x1, y1, top), (x0, y1, top))          # top
             m.quad((x0, y0, base), (x0, y1, base), (x1, y1, base), (x1, y0, base))      # bottom
             # walls where the neighbour is lower: (dr, dc, edge start, edge end) seen from outside
@@ -132,9 +135,77 @@ def _heightfield(heights: list[list[float]], cell: float, base: float = 0.0) -> 
     return m
 
 
+def label_text(profile_name: str) -> str:
+    """What to print by default: the name without the '@Printer' part."""
+    return profile_name.split(" @")[0].strip()
+
+
+def _font(size: int):
+    from PIL import ImageFont
+    try:
+        return ImageFont.load_default(size=size)  # vector font bundled with Pillow
+    except (TypeError, OSError):
+        return ImageFont.load_default()
+
+
+def _wrap(text: str, font, max_px: int, max_lines: int) -> list[str] | None:
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        trial = f"{cur} {w}".strip()
+        if font.getbbox(trial)[2] <= max_px or not cur:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines or any(font.getbbox(l)[2] > max_px for l in lines):
+        return None
+    return lines
+
+
+def label_mask(text: str, width_mm: float, max_lines: int = 2) -> list[list[bool]]:
+    """Rasterise the name to a grid of LABEL_PX squares that fits the plate width."""
+    from PIL import Image, ImageDraw
+    text = " ".join(text.split())
+    if not text:
+        return []
+    margin = 2.0
+    max_px = int((width_mm - 2 * margin) / LABEL_PX)
+    lines, font = None, None
+    for size in range(22, 13, -1):           # ~5.5 mm down to ~3.5 mm tall
+        font = _font(size)
+        lines = _wrap(text, font, max_px, max_lines)
+        if lines:
+            break
+    if not lines:                             # too long even when small: shorten
+        font = _font(14)
+        while text and not (lines := _wrap(text + "…", font, max_px, max_lines)):
+            text = text[:-1].rstrip()
+        lines = lines or ["…"]
+    asc, desc = font.getmetrics()
+    line_h = asc + desc + 2
+    pad = int(round(1.5 / LABEL_PX))
+    w_px = int(round(width_mm / LABEL_PX))
+    h_px = pad * 2 + line_h * len(lines)
+    img = Image.new("L", (w_px, h_px), 0)
+    draw = ImageDraw.Draw(img)
+    for i, line in enumerate(lines):
+        lw = font.getbbox(line)[2]
+        draw.text(((w_px - lw) // 2, pad + i * line_h), line, font=font, fill=255)
+    px = img.load()
+    return [[px[x, y] >= 110 for x in range(w_px)] for y in range(h_px)]
+
+
 def build_parts(matrix: list[list[bool]], size_mm: float = 60.0, thickness: float = 5.0,
-                style: str = "two_colour") -> tuple[list[tuple[str, _Mesh]], float]:
-    """Return ([(part name, mesh)], module size in mm)."""
+                style: str = "two_colour", label: str = "") -> tuple[list[tuple[str, _Mesh]], float]:
+    """Return ([(part name, mesh)], module size in mm).
+
+    Layout: the QR code fills a size x size square; the name (if any) sits on
+    a strip below it, the same width.
+    """
+    if style not in ("two_colour", "hollow"):
+        raise ValueError("style must be two_colour or hollow")
     n = len(matrix)
     total = n + 2 * QUIET
     cell = size_mm / total
@@ -142,18 +213,29 @@ def build_parts(matrix: list[list[bool]], size_mm: float = 60.0, thickness: floa
     for r, row in enumerate(matrix):
         for c, val in enumerate(row):
             dark[r + QUIET][c + QUIET] = val
+    text = label_mask(label, size_mm) if label and label.strip() else []
+    label_h = len(text) * LABEL_PX
+    # make the strip exactly fill the width
+    lcell = size_mm / len(text[0]) if text else LABEL_PX
 
     if style == "hollow":
         floor = min(HOLLOW_FLOOR, thickness - 0.4)
-        heights = [[floor if d else thickness for d in row] for row in dark]
-        return [("Swatch", _heightfield(heights, cell))], cell
+        body = _heightfield([[floor if d else thickness for d in row] for row in dark], cell, oy=label_h)
+        parts = [("Swatch", body)]
+        if text:
+            cut = thickness - min(TEXT_DEPTH, thickness - 0.4)
+            parts.append(("Name", _heightfield([[cut if t else thickness for t in row] for row in text], lcell)))
+        return parts, cell
 
-    if style != "two_colour":
-        raise ValueError("style must be two_colour or hollow")
     pocket = thickness - INLAY_DEPTH
-    body = _heightfield([[pocket if d else thickness for d in row] for row in dark], cell)
-    qr = _heightfield([[thickness if d else 0.0 for d in row] for row in dark], cell, base=pocket)
-    return [("Swatch", body), ("QR code (second colour)", qr)], cell
+    body = _heightfield([[pocket if d else thickness for d in row] for row in dark], cell, oy=label_h)
+    inlay = _heightfield([[thickness if d else 0.0 for d in row] for row in dark], cell, base=pocket, oy=label_h)
+    parts = [("Swatch", body)]
+    if text:
+        parts.append(("Name plate", _heightfield([[pocket if t else thickness for t in row] for row in text], lcell)))
+        _heightfield([[thickness if t else 0.0 for t in row] for row in text], lcell, base=pocket, m=inlay)
+    parts.append(("QR code and name (second colour)" if text else "QR code (second colour)", inlay))
+    return parts, cell
 
 
 # -------------------------------------------------------------------- 3MF

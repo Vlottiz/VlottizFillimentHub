@@ -130,9 +130,13 @@ def test_swatch_3mf_download(client):
     root = ET.fromstring(z.read("3D/3dmodel.model"))
     assert root.get("unit") == "millimeter"
     objs = root.findall("m:resources/m:object", ns)
-    assert [o.get("name") for o in objs][:2] == ["Swatch", "QR code (second colour)"]
-    assert len(objs[2].findall("m:components/m:component", ns)) == 2
-    assert root.find("m:build/m:item", ns).get("objectid") == objs[2].get("id")
+    assert [o.get("name") for o in objs][:3] == ["Swatch", "Name plate", "QR code and name (second colour)"]
+    assert len(objs[3].findall("m:components/m:component", ns)) == 3
+    assert root.find("m:build/m:item", ns).get("objectid") == objs[3].get("id")
+    # no label when asked for none
+    z2 = zipfile.ZipFile(io.BytesIO(client.get(f"/api/profiles/{pid}/swatch.3mf?label=").content))
+    names = [o.get("name") for o in ET.fromstring(z2.read("3D/3dmodel.model")).findall("m:resources/m:object", ns)]
+    assert names[:2] == ["Swatch", "QR code (second colour)"]
     assert client.get(f"/api/profiles/{pid}/swatch.3mf?style=nope").status_code == 400
     assert client.get(f"/api/profiles/{pid}/swatch.3mf?size=5").status_code == 400
 
@@ -150,3 +154,53 @@ def test_fields_lists_match():
         assert f'"{k}"' in js
     assert js.count('"filament_') + js.count('"nozzle_') > 0
     assert orca.PRESET_VERSION in js
+
+
+@pytest.mark.parametrize("style", ["two_colour", "hollow"])
+def test_swatch_with_name_label(style):
+    m = swatch.qr_matrix("https://example.com/#" + "x" * 150)
+    parts, cell = swatch.build_parts(m, 60, 5, style, "Giantarm PLA Silk Silver")
+    label_h = len(swatch.label_mask("Giantarm PLA Silk Silver", 60)) * swatch.LABEL_PX
+    assert 5 < label_h < 20
+    total = 0
+    for name, mesh in parts:
+        closed, vol = _mesh_ok(mesh)
+        assert closed and vol > 0, name
+        ys = [v[1] for v in mesh.verts]
+        assert min(ys) >= -1e-6 and max(ys) <= 60 + label_h + 1e-6
+        total += vol
+    if style == "two_colour":
+        assert total == pytest.approx(60 * (60 + label_h) * 5, rel=1e-6)   # parts fill the plate exactly
+    else:
+        assert total < 60 * (60 + label_h) * 5
+
+
+def test_label_fits_and_long_names_are_shortened():
+    assert swatch.label_text("Giantarm PLA Silk Silver @Snapmaker U1") == "Giantarm PLA Silk Silver"
+    short = swatch.label_mask("PLA", 60)
+    long = swatch.label_mask("An Extremely Long Filament Brand Name With Lots Of Words In It Really", 60)
+    for mask in (short, long):
+        assert len(mask[0]) == round(60 / swatch.LABEL_PX)
+        assert any(any(r) for r in mask)
+        # 2 mm clear margin on both sides
+        edge = round(2 / swatch.LABEL_PX)
+        assert not any(r[:edge - 1] and any(r[:edge - 1]) for r in mask)
+        assert not any(any(r[-(edge - 1):]) for r in mask)
+    assert len(long) <= len(swatch.label_mask("Two lines of text here please", 60)) + 2
+    assert swatch.label_mask("   ", 60) == []
+
+
+def test_import_from_swatch_link(client):
+    pid = _calibrated_profile(client)
+    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    before = client.get(f"/api/profiles/{pid}").json()
+    client.delete(f"/api/profiles/{pid}")
+    r = client.post("/api/import-swatch-link", json={"link": "  " + url + "\n"})
+    assert r.status_code == 200, r.text
+    p = r.json()
+    assert p["name"] == before["name"] and p["import"]["new_profile"]
+    assert p["printer"]["name"].startswith("Snapmaker U1")
+    for k in ("pressure_advance", "nozzle_temperature", "filament_flow_ratio"):
+        assert p["settings"][k] == before["settings"][k]
+    assert p["sources"]["pressure_advance"] == "calibrated" and p["sources"]["fan_max_speed"] == "tested"
+    assert client.post("/api/import-swatch-link", json={"link": "https://example.com/#nope"}).status_code == 400

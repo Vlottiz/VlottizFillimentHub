@@ -2,6 +2,7 @@ fastapi>=0.110
 httpx>=0.27
 pypdf>=4.0
 segno>=1.6
+Pillow>=10.1
 zstandard>=0.22; sys_platform == "linux"
 uvicorn>=0.29
 python-multipart>=0.0.9

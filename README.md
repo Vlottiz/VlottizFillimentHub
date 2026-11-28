@@ -82,6 +82,10 @@ On a profile, click **Print QR swatch** to download a `.3mf` plate (60 × 60 × 
 - **Two-colour** (best scanning): the QR code is a separate 0.6 mm part. In Orca, give "QR code (second colour)" a dark filament in another toolhead.
 - **Hollowed out** (one colour): the dark squares are cut almost all the way through, so their shadows form the code.
 
+The filament's name is printed under the code (you can change the text in the dialog, or leave it blank).
+
+**Scanning shows nothing?** Check that the QR part was printed in a *different, darker* filament than the plate (same filament = invisible code), that GitHub Pages is turned on (below), and try scanning in good light from about 15–20 cm. Without the scan page, you can still get the profile: copy the link your phone shows, and in the app use **Filaments → Paste swatch link**.
+
 **One-time setup:** the scan page is `docs/index.html` in this repo. Turn on GitHub Pages: repo **Settings → Pages → Deploy from a branch → main → /docs → Save**. The page address (default `https://vlottiz.github.io/VlottizFillimentHub/`) can be changed in the QR dialog.
 
 ## Reaching 100%
