@@ -13,6 +13,7 @@
     <button data-view="filaments" class="active">Filaments</button>
     <button data-view="profiles">Profiles</button>
     <button data-view="calibrate">Calibrate</button>
+    <button data-view="spools">Spools</button>
     <button data-view="printers">Printers</button>
     <button data-view="backup">Orca &amp; backup</button>
     <button data-view="ai">AI <span id="ai-dot" class="dot"></span></button>
@@ -52,9 +53,21 @@
     <div id="cal-body"></div>
   </section>
 
+  <section id="view-spools" class="view">
+    <div class="bar">
+      <h1>Spools</h1>
+      <label class="small" style="display:flex;gap:6px;align-items:center;color:var(--text)"><input type="checkbox" id="spool-all"> Show empty</label>
+      <button id="count-gcode">Count a G-code file</button>
+      <input type="file" id="count-gcode-file" accept=".gcode,.gco,.g,.bgcode" hidden>
+      <button class="primary" id="add-spool">+ Add spool</button>
+    </div>
+    <div id="spools-body"></div>
+  </section>
+
   <section id="view-printers" class="view">
     <div class="bar">
       <h1>Printers</h1>
+      <button id="link-orca-printer" class="primary">Link from Orca</button>
       <button id="add-printer">+ Add printer</button>
     </div>
     <div id="printer-list" class="cards wide"></div>

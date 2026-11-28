@@ -7,6 +7,7 @@ import sqlite3
 import json
 import os
 import secrets
+import sys
 import time
 import zipfile
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import calibration, klipper, materials, orca, paths, swatch, troubleshoot, tuning
+from . import calibration, klipper, materials, orca, orca_link, paths, spools, swatch, troubleshoot, tuning
 from . import walls as wallmod
 from .ai import extract as ai_extract
 from .ai.images import shrink as shrink_image
@@ -63,6 +64,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             ai.cleanup_stale()
             if ai.settings["enabled"]:
                 ai.start_async()
+        count_pending_usage()
         try:
             yield
         finally:
@@ -308,6 +310,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         p["loaded_in"] = [{"printer_id": pr["id"], "printer": pr["name"], "toolhead": int(n)}
                           for pr in db.all("SELECT * FROM printers ORDER BY id")
                           for n, v in (pr["data"].get("loaded") or {}).items() if v and v.get("profile_id") == pid]
+        p["spools"] = [spool_view(sp) for sp in db.all(
+            "SELECT * FROM spools WHERE profile_id = ? ORDER BY number", (pid,))]
         p["walls"] = wallmod.normalise(p.get("walls"))
         p["wall_check"] = wallmod.flow_check(p["walls"], p["settings"], printer)
         p["troubleshoots"] = [_session_view(t) for t in db.all(
@@ -734,7 +738,13 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
     def qr_settings() -> dict:
         return {"base_url": swatch.DEFAULT_BASE_URL, **(db.get_setting("qr") or {})}
 
-    def qr_link(p: dict) -> str:
+    QR_CODES = ("short", "full")
+
+    def qr_link(p: dict, code: str = "short") -> str:
+        if code == "short":
+            return swatch.link(qr_settings()["base_url"], swatch.encode_short(
+                p["name"], p.get("material") or p["settings"].get("filament_type"),
+                p["settings"].get("default_filament_colour")))
         preset = preset_for(p, in_bundle=True)
         values = {k: preset[k][0] for k in orca.QR_FIELDS_V1 if k in preset}
         group = orca_group()
@@ -760,27 +770,33 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         return qr_settings()
 
     @app.get("/api/profiles/{pid}/qr")
-    def profile_qr(pid: int, size: float = 60):
-        url = qr_link(get_profile(pid))
+    def profile_qr(pid: int, size: float = 60, code: str = "full"):
+        if code not in QR_CODES:
+            raise HTTPException(400, "code must be short or full")
+        url = qr_link(get_profile(pid), code)
         try:
             matrix = swatch.qr_matrix(url)
         except ValueError:
             raise HTTPException(400, "Too much data for a QR code")
         n = len(matrix)
+        used = swatch.plate_size(n, size)
         return {"url": url, "chars": len(url), "modules": n, "svg": swatch.qr_svg(url),
                 "label": swatch.label_text(get_profile(pid)["name"]),
-                "module_mm": round(size / (n + 2 * swatch.QUIET), 2)}
+                "size_mm": used, "min_size_mm": swatch.plate_size(n, 0), "min_module_mm": swatch.MIN_MODULE_MM,
+                "module_mm": round(used / (n + 2 * swatch.QUIET), 2)}
 
     @app.get("/api/profiles/{pid}/swatch.3mf")
     def profile_swatch(pid: int, style: str = "two_colour", size: float = 60, thickness: float = 5,
-                       label: str | None = None):
+                       label: str | None = None, code: str = "full"):
+        if code not in QR_CODES:
+            raise HTTPException(400, "code must be short or full")
         if style not in ("two_colour", "hollow"):
             raise HTTPException(400, "style must be two_colour or hollow")
-        if not (30 <= size <= 150 and 2 <= thickness <= 15):
-            raise HTTPException(400, "Size must be 30-150 mm and thickness 2-15 mm")
+        if not (30 <= size <= 250 and 2 <= thickness <= 15):
+            raise HTTPException(400, "Size must be 30-250 mm and thickness 2-15 mm")
         p = get_profile(pid)
         text = swatch.label_text(p["name"]) if label is None else label[:80]
-        parts, _cell = swatch.build_parts(swatch.qr_matrix(qr_link(p)), size, thickness, style, text)
+        parts, _cell = swatch.build_parts(swatch.qr_matrix(qr_link(p, code)), size, thickness, style, text)
         data = swatch.to_3mf(parts, f"{p['name']} QR swatch")
         fname = orca.safe_filename(f"{p['name']} QR swatch") + ".3mf"
         return Response(data, media_type="model/3mf",
@@ -1105,6 +1121,11 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             d = swatch.decode(frag)
         except ValueError as e:
             raise HTTPException(400, f"{e}. Copy the whole link your phone shows after scanning.")
+        if d.get("short"):
+            p = _find_profile_for(d)
+            if p:
+                return {**profile_detail(p["id"]), "import": {"profile_id": p["id"], "existing": True}}
+            raise HTTPException(400, "This quick-scan swatch only carries the filament's name, so it can't add the settings. Scan it on the computer whose app made it, or ask for a full-settings swatch or the .json.")
         preset = orca.to_preset(
             f"{d['group']} {d['name']}" if d["group"] else d["name"], d["settings"], inherits=d["inherits"],
             compatible_printers=[d["printer"]] if d["printer"] else None,
@@ -1155,12 +1176,13 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                              "material": d["settings"].get("filament_type"),
                              "nozzle": d["settings"].get("nozzle_temperature"),
                              "calibrated": [k for k, v in d["sources"].items() if v in ("calibrated", "tested")]}}
+        result["swatch"]["short"] = bool(d.get("short"))
         if not p:
-            result["app"] = {"status": "missing"}
+            result["app"] = {"status": "missing", "can_add": not d.get("short")}
             copies = orca.find_copies(orca.name_variants(d["name"], orca_group()))
             result["orca"] = {"installed": bool(copies), "up_to_date": False, "copies": len(copies)}
         else:
-            diffs = _swatch_diffs(p["settings"], d["settings"])
+            diffs = [] if d.get("short") else _swatch_diffs(p["settings"], d["settings"])
             result["app"] = {"status": "different" if diffs else "same", "profile_id": p["id"],
                              "name": p["name"], "diffs": diffs}
             st = orca_status(p["id"])
@@ -1188,6 +1210,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         if body.action not in ("add", "update"):
             raise HTTPException(400, "action must be add or update")
         d = _decode_link(body.link)
+        if d.get("short"):
+            raise HTTPException(400, "This quick-scan swatch only carries the filament's name, so it can't add the settings. Scan it on the computer whose app made it, or ask for a full-settings swatch or the .json.")
         existing = _find_profile_for(d)
         if body.action == "add" and existing:
             raise HTTPException(400, "It's already in the app")
@@ -1197,6 +1221,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
 
     class ToolheadIn(BaseModel):
         profile_id: int | None = None
+        spool_id: int | None = None
 
     @app.put("/api/printers/{prid}/toolheads/{n}")
     def set_toolhead(prid: int, n: int, body: ToolheadIn):
@@ -1212,11 +1237,430 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             loaded.pop(str(n), None)
         else:
             p = get_profile(body.profile_id)
-            loaded[str(n)] = {"profile_id": p["id"], "name": p["name"],
+            spool_id = body.spool_id
+            if spool_id is None:
+                active = db.all("SELECT id FROM spools WHERE profile_id = ? AND status = 'active' ORDER BY number", (p["id"],))
+                spool_id = active[0]["id"] if len(active) == 1 else None
+            loaded[str(n)] = {"profile_id": p["id"], "name": p["name"], "spool_id": spool_id, "source": "app",
                               "colour": p["settings"].get("default_filament_colour"), "at": time.time()}
         pr["data"]["loaded"] = loaded
         db.update("printers", prid, {"data": pr["data"]})
         return db.one("SELECT * FROM printers WHERE id = ?", (prid,))
+
+    # ------------------------------------------------ printers linked to Orca
+    def profile_for_preset(name: str | None) -> dict | None:
+        if not name:
+            return None
+        return _find_profile_for({"name": name})
+
+    machine_cache: dict = {"files": None, "at": 0.0}
+
+    def orca_machine_files(refresh: bool = False):
+        if refresh or machine_cache["files"] is None or time.time() - machine_cache["at"] > 60:
+            machine_cache["files"] = orca_link.machine_files()
+            machine_cache["at"] = time.time()
+        return machine_cache["files"]
+
+    @app.get("/api/orca/printers")
+    def orca_printers():
+        """Printers set up in Orca, to link one to the app."""
+        found = orca_link.printers()
+        orca_machine_files(refresh=True)
+        linked = {pr["data"].get("orca_printer"): pr["id"] for pr in db.all("SELECT * FROM printers")
+                  if pr["data"].get("orca_link")}
+        return {"found": bool(orca.config_dir() and orca.config_dir().is_dir()),
+                "printers": [{**x, "linked_to": linked.get(x["name"])} for x in found]}
+
+    class LinkIn(BaseModel):
+        orca_printer: str
+        printer_id: int | None = None  # update this one, or add a new printer
+
+    @app.post("/api/printers/link-orca")
+    def link_orca(body: LinkIn):
+        files = orca_machine_files(refresh=True)
+        if body.orca_printer not in files:
+            raise HTTPException(404, "That printer isn't in Orca")
+        fields = orca_link.printer_fields(orca_link.resolve(body.orca_printer, files))
+        if body.printer_id:
+            pr = db.one("SELECT * FROM printers WHERE id = ?", (body.printer_id,))
+            if not pr:
+                raise HTTPException(404, "Printer not found")
+            data = {**pr["data"], **fields, "orca_link": True}
+            db.update("printers", pr["id"], {"data": data})
+            prid = pr["id"]
+        else:
+            name = body.orca_printer.split(" (")[0]
+            prid = db.insert("printers", {"name": body.orca_printer if any(
+                x["name"] == name for x in db.all("SELECT name FROM printers")) else name,
+                "data": {**fields, "orca_link": True}})
+        data = db.one("SELECT data FROM printers WHERE id = ?", (prid,))["data"]
+        data.pop("orca_sig", None)  # take Orca's slots on the next sync
+        db.update("printers", prid, {"data": data})
+        orca_sync(force=True)
+        return db.one("SELECT * FROM printers WHERE id = ?", (prid,))
+
+    @app.post("/api/printers/{prid}/unlink-orca")
+    def unlink_orca(prid: int):
+        pr = db.one("SELECT * FROM printers WHERE id = ?", (prid,))
+        if not pr:
+            raise HTTPException(404, "Printer not found")
+        for k in ("orca_link", "orca_sig", "orca_fields_at"):
+            pr["data"].pop(k, None)
+        db.update("printers", prid, {"data": pr["data"]})
+        return pr
+
+    sync_state = {"mtime": None, "fields_at": 0.0, "result": None}
+
+    def orca_sync(force: bool = False) -> dict:
+        """Bring linked printers up to date with Orca: settings and what's in each slot.
+
+        Orca saves its slots to OrcaSlicer.conf within a second or so of a change, so this
+        is cheap to call every few seconds: it only reads the file when it has changed.
+        """
+        mtime = orca_link.conf_mtime()
+        refresh_fields = force or time.time() - sync_state["fields_at"] > 60
+        if not force and mtime == sync_state["mtime"] and not refresh_fields and sync_state["result"]:
+            return sync_state["result"]
+        conf = orca_link.read_conf()
+        sel = orca_link.selection(conf)
+        slots_by = orca_link.printer_slots(conf)
+        changed = []
+        files = orca_machine_files(refresh=refresh_fields) if refresh_fields else None
+        for pr in db.all("SELECT * FROM printers ORDER BY id"):
+            d = pr["data"]
+            if not d.get("orca_link") or not d.get("orca_printer"):
+                continue
+            before = json.dumps(d, sort_keys=True)
+            if files is not None and d["orca_printer"] in files:
+                d.update(orca_link.printer_fields(orca_link.resolve(d["orca_printer"], files)))
+            slots = slots_by.get(d["orca_printer"])
+            if d["orca_printer"] == sel["printer"]:
+                slots = {"filaments": sel["filaments"], "colours": sel["colours"]}
+            if slots and slots["filaments"]:
+                sig = json.dumps(slots, sort_keys=True)
+                if sig != d.get("orca_sig"):  # Orca changed: Orca wins. Otherwise keep what you set in the app.
+                    old = d.get("loaded") or {}
+                    loaded = {}
+                    for i, name in enumerate(slots["filaments"][: int(d.get("toolheads") or len(slots["filaments"]))]):
+                        prof = profile_for_preset(name)
+                        prev = old.get(str(i + 1)) or {}
+                        colour = slots["colours"][i] if i < len(slots["colours"]) else None
+                        loaded[str(i + 1)] = {
+                            "profile_id": prof["id"] if prof else None, "name": prof["name"] if prof else name,
+                            "orca_name": name, "source": "orca", "at": time.time(),
+                            "colour": colour or (prof or {}).get("settings", {}).get("default_filament_colour"),
+                            "spool_id": prev.get("spool_id") if prof and prev.get("profile_id") == prof["id"] else None}
+                        if prof and loaded[str(i + 1)]["spool_id"] is None:
+                            active = db.all("SELECT id FROM spools WHERE profile_id = ? AND status = 'active'", (prof["id"],))
+                            if len(active) == 1:
+                                loaded[str(i + 1)]["spool_id"] = active[0]["id"]
+                    d["loaded"] = loaded
+                    d["orca_sig"] = sig
+            if json.dumps(d, sort_keys=True) != before:
+                db.update("printers", pr["id"], {"data": d})
+                changed.append(pr["id"])
+        if refresh_fields:
+            sync_state["fields_at"] = time.time()
+        sync_state["mtime"] = mtime
+        sync_state["result"] = {"orca_printer": sel["printer"], "slots": [
+            {"slot": i + 1, "name": n, "colour": sel["colours"][i] if i < len(sel["colours"]) else None}
+            for i, n in enumerate(sel["filaments"])], "changed": changed, "at": time.time()}
+        return sync_state["result"]
+
+    @app.get("/api/orca/live")
+    def orca_live():
+        r = orca_sync()
+        return {**r, "changed": r["changed"] if time.time() - r["at"] < 5 else []}
+
+    # ---------------------------------------------------------------- spools
+    def spool_view(sp: dict) -> dict:
+        prof = db.one("SELECT id, name, material, settings FROM profiles WHERE id = ?", (sp["profile_id"],)) \
+            if sp.get("profile_id") else None
+        fil = db.one("SELECT id, brand, name, colour_name, colour_hex FROM filaments WHERE id = ?", (sp["filament_id"],)) \
+            if sp.get("filament_id") else None
+        where = [{"printer_id": pr["id"], "printer": pr["name"], "toolhead": int(n)}
+                 for pr in db.all("SELECT * FROM printers ORDER BY id")
+                 for n, v in (pr["data"].get("loaded") or {}).items() if v and v.get("spool_id") == sp["id"]]
+        used = db.one("SELECT COALESCE(SUM(counted_g), 0) AS g, COUNT(*) AS n FROM usage WHERE spool_id = ? AND kind = 'print'",
+                      (sp["id"],))
+        name = prof["name"].split(" @")[0] if prof else (f"{fil['brand'] or ''} {fil['name']}".strip() if fil else "Spool")
+        return {**sp, **spools.spool_status(sp), "name": name, "label": f"{name} #{sp['number']}",
+                "material": prof["material"] if prof else None,
+                "colour": (prof["settings"].get("default_filament_colour") if prof else None) or (fil or {}).get("colour_hex"),
+                "loaded_in": where, "printed_g": round(used["g"], 1), "prints": used["n"]}
+
+    def get_spool(sid: int) -> dict:
+        sp = db.one("SELECT * FROM spools WHERE id = ?", (sid,))
+        if not sp:
+            raise HTTPException(404, "Spool not found")
+        return sp
+
+    @app.get("/api/spools")
+    def list_spools(profile_id: int | None = None, include_done: bool = False):
+        sql, args = "SELECT * FROM spools", []
+        cond = []
+        if profile_id:
+            cond.append("profile_id = ?"); args.append(profile_id)
+        if not include_done:
+            cond.append("status = 'active'")
+        if cond:
+            sql += " WHERE " + " AND ".join(cond)
+        return [spool_view(sp) for sp in db.all(sql + " ORDER BY profile_id, number", args)]
+
+    class SpoolIn(BaseModel):
+        profile_id: int | None = None
+        filament_id: int | None = None
+        net_g: float | None = 1000
+        tare_g: float | None = None
+        remaining_g: float | None = None
+        count: int = 1
+        notes: str | None = None
+
+    @app.post("/api/spools")
+    def add_spools(body: SpoolIn):
+        if not body.profile_id and not body.filament_id:
+            raise HTTPException(400, "Pick the filament this spool is")
+        if body.profile_id:
+            prof = get_profile(body.profile_id)
+            fid = body.filament_id or prof.get("filament_id")
+        else:
+            fid = body.filament_id
+        key, val = ("profile_id", body.profile_id) if body.profile_id else ("filament_id", fid)
+        top = db.one(f"SELECT COALESCE(MAX(number), 0) AS n FROM spools WHERE {key} = ?", (val,))["n"]
+        made = []
+        for i in range(max(1, min(body.count, 50))):
+            made.append(db.insert("spools", {
+                "profile_id": body.profile_id, "filament_id": fid, "number": top + i + 1,
+                "net_g": body.net_g, "tare_g": body.tare_g,
+                "remaining_g": body.remaining_g if body.remaining_g is not None else body.net_g,
+                "notes": body.notes}))
+        return [spool_view(get_spool(i)) for i in made]
+
+    class SpoolEdit(BaseModel):
+        number: int | None = None
+        net_g: float | None = None
+        tare_g: float | None = None
+        remaining_g: float | None = None
+        status: str | None = None
+        notes: str | None = None
+
+    @app.put("/api/spools/{sid}")
+    def edit_spool(sid: int, body: SpoolEdit):
+        sp = get_spool(sid)
+        vals = body.model_dump(exclude_unset=True)
+        if "status" in vals and vals["status"] not in ("active", "empty", "archived"):
+            raise HTTPException(400, "Status is active, empty or archived")
+        if "remaining_g" in vals and vals["remaining_g"] is not None and sp["remaining_g"] is not None:
+            delta = sp["remaining_g"] - vals["remaining_g"]
+            if abs(delta) > 0.05:
+                db.insert("usage", {"spool_id": sid, "profile_id": sp["profile_id"], "kind": "adjust",
+                                    "job": "Set by hand", "grams": delta, "counted_g": delta})
+        db.update("spools", sid, vals)
+        return spool_view(get_spool(sid))
+
+    class WeighIn(BaseModel):
+        gross_g: float
+        tare_g: float | None = None
+
+    @app.post("/api/spools/{sid}/weigh")
+    def weigh_spool(sid: int, body: WeighIn):
+        """You put the spool (filament and all) on a scale.
+
+        - Empty spool weight known: what's left = reading minus the empty spool.
+        - A new, unused spool: the empty spool weight is worked out (reading minus the full amount).
+        - Otherwise: the reading is compared with the last one. What the scale says you used is
+          checked against what Orca counted in between, and the count is corrected.
+        - First reading of a used spool: kept as the starting point for next time.
+        """
+        sp = get_spool(sid)
+        tare = body.tare_g if body.tare_g is not None else sp.get("tare_g")
+        gross = round(body.gross_g, 1)
+        if gross <= 0:
+            raise HTTPException(400, "Enter what the scale reads, in grams")
+        before = sp["remaining_g"]
+        prev = db.one("SELECT * FROM usage WHERE spool_id = ? AND kind = 'weigh' AND "
+                      "json_extract(data, '$.gross_g') IS NOT NULL ORDER BY id DESC LIMIT 1", (sid,))
+        printed = db.one("SELECT COUNT(*) AS n FROM usage WHERE spool_id = ? AND kind = 'print' AND counted_g > 0",
+                         (sid,))["n"]
+        out: dict = {"gross_g": gross}
+        if tare is not None:
+            left = spools.from_weighing(gross, tare)
+            out.update(mode="tare", message=f"{left:g} g left (scale minus the {tare:g} g empty spool)")
+        elif not printed and not prev and sp.get("net_g") and before is not None and abs(before - sp["net_g"]) < 0.5:
+            tare = round(gross - sp["net_g"], 1)
+            if tare < 0:
+                raise HTTPException(400, f"That's less than the {sp['net_g']:g} g of filament a full spool has. "
+                                         "Check the scale, or set how much is on the spool with Edit.")
+            left = before
+            out.update(mode="new", message=f"New spool: the empty spool weighs about {tare:g} g. Saved for next time.")
+        elif prev:
+            scale_used = round(prev["data"]["gross_g"] - gross, 1)
+            counted = db.one("SELECT COALESCE(SUM(counted_g), 0) AS g FROM usage WHERE spool_id = ? AND "
+                             "kind = 'print' AND id > ?", (sid, prev["id"]))["g"]
+            start_left = prev["data"].get("left_after")
+            left = round(max(0.0, (start_left if start_left is not None else (before or 0) + counted) - scale_used), 1)
+            out.update(mode="compare", scale_used_g=scale_used, counted_g=round(counted, 1),
+                       off_g=round(scale_used - counted, 1),
+                       message=f"Since the last weigh: the scale says {scale_used:g} g used, Orca counted {counted:.1f} g")
+        else:
+            left = before
+            out.update(mode="baseline", message="Saved as a starting point. Weigh it again after printing: "
+                                                "the app compares the scale with what Orca counted.")
+        if left is None:
+            left = before
+        delta = round((before or 0) - (left or 0), 2) if before is not None and left is not None else 0.0
+        db.insert("usage", {"spool_id": sid, "profile_id": sp["profile_id"], "kind": "weigh",
+                            "job": f"Weighed {gross:g} g", "grams": delta, "counted_g": delta,
+                            "data": {"gross_g": gross, "tare_g": tare, "expected_g": before, "left_after": left,
+                                     "mode": out["mode"]}})
+        db.update("spools", sid, {"remaining_g": left, "tare_g": tare,
+                                  "status": "empty" if left is not None and left < 1 else sp["status"]})
+        return {**spool_view(get_spool(sid)), **out, "difference_g": round(delta, 1)}
+
+    @app.delete("/api/spools/{sid}")
+    def delete_spool(sid: int):
+        get_spool(sid)
+        db.delete("spools", sid)
+        for pr in db.all("SELECT * FROM printers"):
+            loaded = pr["data"].get("loaded") or {}
+            if any(v and v.get("spool_id") == sid for v in loaded.values()):
+                for v in loaded.values():
+                    if v and v.get("spool_id") == sid:
+                        v["spool_id"] = None
+                db.update("printers", pr["id"], {"data": pr["data"]})
+        return {"ok": True}
+
+    # ------------------------------------------------------- usage from Orca
+    def take(spool_id: int | None, grams: float) -> None:
+        if spool_id and grams:
+            sp = db.one("SELECT * FROM spools WHERE id = ?", (spool_id,))
+            if sp and sp["remaining_g"] is not None:
+                left = round(sp["remaining_g"] - grams, 2)
+                db.update("spools", spool_id, {"remaining_g": max(0.0, left)})
+
+    def pick_spool(profile_id: int | None, loaded: dict | None) -> int | None:
+        if loaded and loaded.get("spool_id") and db.one("SELECT id FROM spools WHERE id = ?", (loaded["spool_id"],)):
+            return loaded["spool_id"]
+        if not profile_id:
+            return None
+        active = db.all("SELECT id FROM spools WHERE profile_id = ? AND status = 'active' ORDER BY number", (profile_id,))
+        if len(active) == 1:
+            return active[0]["id"]
+        if active:  # several open: the one used last
+            last = db.one(f"SELECT spool_id FROM usage WHERE kind = 'print' AND spool_id IN "
+                          f"({','.join(str(a['id']) for a in active)}) ORDER BY id DESC LIMIT 1")
+            return last["spool_id"] if last else active[0]["id"]
+        return None
+
+    class ReportIn(BaseModel):
+        job: str | None = None
+        usage: dict
+
+    @app.post("/api/usage/report")
+    def usage_report(body: ReportIn):
+        """Orca sliced and exported (or sent) a print: take what it uses off the loaded spools."""
+        u = body.usage
+        slots = u.get("slots") or []
+        if not slots:
+            return {"recorded": [], "message": "No filament use found in that G-code"}
+        job = (body.job or "Print").strip()[:200]
+        recent = db.one("SELECT data FROM usage WHERE kind = 'print' AND job = ? AND created > ? ORDER BY id DESC LIMIT 1",
+                        (job, time.time() - 90))
+        sig = json.dumps([(s.get("slot"), s.get("grams")) for s in slots])
+        if recent and recent["data"].get("sig") == sig:
+            return {"recorded": [], "message": "Already counted"}
+        printers_ = db.all("SELECT * FROM printers ORDER BY id")
+        pr = next((x for x in printers_ if u.get("printer") and x["data"].get("orca_printer") == u["printer"]), None) \
+            or next((x for x in printers_ if x["data"].get("orca_link")), None) or (printers_[0] if printers_ else None)
+        loaded_map = (pr or {}).get("data", {}).get("loaded") or {}
+        out = []
+        for s in slots:
+            n = int(s.get("slot") or 1)
+            loaded = loaded_map.get(str(n))
+            prof = profile_for_preset(s.get("preset"))
+            pid = prof["id"] if prof else (loaded or {}).get("profile_id")
+            if loaded and prof and loaded.get("profile_id") not in (None, prof["id"]):
+                loaded = None  # the G-code says another filament is in that slot
+            grams = float(s.get("grams") or 0)
+            sid = pick_spool(pid, loaded)
+            uid = db.insert("usage", {"spool_id": sid, "profile_id": pid, "printer_id": (pr or {}).get("id"),
+                                      "slot": n, "kind": "print", "job": job, "grams": grams, "counted_g": grams,
+                                      "data": {"preset": s.get("preset"), "sig": sig, "colour": s.get("colour")}})
+            take(sid, grams)
+            out.append(uid)
+        return {"recorded": out, "message": f"Counted {u.get('total_g', 0):g} g for {job}"}
+
+    @app.post("/api/usage/gcode")
+    def usage_gcode(file: UploadFile = File(...)):
+        """Count a G-code file you pick by hand (same as the Orca hook does)."""
+        raw = file.file.read()
+        return usage_report(ReportIn(job=file.filename, usage=spools.parse_usage(spools.read_gcode_bytes(raw))))
+
+    def usage_view(r: dict) -> dict:
+        sp = db.one("SELECT * FROM spools WHERE id = ?", (r["spool_id"],)) if r.get("spool_id") else None
+        prof = db.one("SELECT name FROM profiles WHERE id = ?", (r["profile_id"],)) if r.get("profile_id") else None
+        return {**r, "spool": spool_view(sp)["label"] if sp else None,
+                "filament": prof["name"].split(" @")[0] if prof else (r["data"] or {}).get("preset")}
+
+    @app.get("/api/usage")
+    def list_usage(spool_id: int | None = None, limit: int = 50):
+        if spool_id:
+            rows = db.all("SELECT * FROM usage WHERE spool_id = ? ORDER BY id DESC LIMIT ?", (spool_id, limit))
+        else:
+            rows = db.all("SELECT * FROM usage WHERE kind = 'print' ORDER BY id DESC LIMIT ?", (limit,))
+        return [usage_view(r) for r in rows]
+
+    class UsageEdit(BaseModel):
+        status: str | None = None     # counted, not_printed, failed
+        percent: float | None = None  # how far a failed print got
+        spool_id: int | None = None
+
+    @app.put("/api/usage/{uid}")
+    def edit_usage(uid: int, body: UsageEdit):
+        """Fix a print's count: it didn't print, failed part way, or used another spool."""
+        r = db.one("SELECT * FROM usage WHERE id = ?", (uid,))
+        if not r or r["kind"] != "print":
+            raise HTTPException(404, "Print not found")
+        vals = body.model_dump(exclude_unset=True)
+        status = vals.get("status", r["status"])
+        if status not in ("counted", "not_printed", "failed"):
+            raise HTTPException(400, "Status is counted, not_printed or failed")
+        pct = vals.get("percent", (r["data"] or {}).get("percent", 100))
+        counted = {"counted": r["grams"], "not_printed": 0.0,
+                   "failed": round(r["grams"] * max(0.0, min(100.0, pct or 0)) / 100, 2)}[status]
+        new_spool = vals["spool_id"] if "spool_id" in vals else r["spool_id"]
+        if new_spool and new_spool != r["spool_id"]:
+            get_spool(new_spool)
+        take(r["spool_id"], -r["counted_g"])  # give back to the old spool, then take from the right one
+        take(new_spool, counted)
+        data = {**(r["data"] or {}), "percent": pct}
+        db.update("usage", uid, {"status": status, "counted_g": counted, "spool_id": new_spool, "data": data})
+        return usage_view(db.one("SELECT * FROM usage WHERE id = ?", (uid,)))
+
+    def count_pending_usage() -> None:
+        """Prints Orca reported while the app was closed."""
+        pending = DATA_DIR / "pending_usage.jsonl"
+        if db_path is not None or not pending.exists():  # tests use their own database
+            return
+        try:
+            lines = pending.read_text(encoding="utf-8").splitlines()
+            pending.unlink()
+        except OSError:
+            return
+        for line in lines:
+            try:
+                usage_report(ReportIn(**json.loads(line)))
+            except (ValueError, TypeError, HTTPException):
+                continue
+
+    @app.get("/api/usage/hook")
+    def usage_hook():
+        """What to paste into Orca's post-processing scripts box."""
+        if getattr(sys, "frozen", False):
+            cmd = f'"{sys.executable}" --report'
+        else:
+            cmd = f'"{sys.executable}" "{Path(__file__).resolve().parent.parent / "run.py"}" --report'
+        return {"command": cmd}
 
     @app.post("/api/scan-swatch")
     def scan_swatch(file: UploadFile = File(...), import_now: bool = Form(True)):
@@ -1257,7 +1701,9 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         """Download the whole database (all filaments, profiles, history)."""
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("forge.sql", "\n".join(db.conn.iterdump()))
+            with db.lock:
+                dump = "\n".join(db.conn.iterdump())
+            z.writestr("forge.sql", dump)
             if PHOTO_DIR.is_dir():
                 for ph in PHOTO_DIR.iterdir():
                     z.write(ph, f"photos/{ph.name}")
@@ -1284,10 +1730,11 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         # keep a safety copy of the current data first
         safety = DATA_DIR / f"before-restore-{int(time.time())}.sql"
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        safety.write_text("\n".join(db.conn.iterdump()), encoding="utf-8")
-        src.backup(db.conn)
-        db.conn.executescript(SCHEMA_SQL)
-        db._migrate()
+        with db.lock:
+            safety.write_text("\n".join(db.conn.iterdump()), encoding="utf-8")
+            src.backup(db.conn)
+            db.conn.executescript(SCHEMA_SQL)
+            db._migrate()
         src.close()
         for name in z.namelist():
             if name.startswith("photos/") and Path(name).suffix.lower() in PHOTO_EXT:

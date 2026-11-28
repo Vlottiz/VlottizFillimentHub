@@ -36,7 +36,7 @@ def _calibrated_profile(client):
 
 def test_link_round_trip_python(client):
     pid = _calibrated_profile(client)
-    q = client.get(f"/api/profiles/{pid}/qr").json()
+    q = client.get(f"/api/profiles/{pid}/qr?code=full").json()
     assert q["url"].startswith("https://vlottiz.github.io/VlottizFillimentHub/#1*")
     d = swatch.decode(q["url"].split("#", 1)[1])
     assert d["name"] == "Giantarm PLA Silk Silver @Snapmaker U1" and d["group"] == "VlottizFF"
@@ -52,7 +52,7 @@ def test_link_round_trip_python(client):
 def test_scan_page_rebuilds_the_same_preset_as_the_app(client):
     """docs/ff.js (what the phone runs) must produce exactly the app's export."""
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     app_json = client.get(f"/api/profiles/{pid}/preview").json()
     app_bundle = zipfile.ZipFile(io.BytesIO(client.get("/api/export-bundle").content))
     app_bundle_preset = json.loads(app_bundle.read([n for n in app_bundle.namelist() if n != "bundle_structure.json"][0]))
@@ -101,23 +101,28 @@ def _mesh_ok(mesh):
 @pytest.mark.parametrize("style", ["two_colour", "hollow"])
 def test_swatch_model_is_solid_and_sized(style):
     m = swatch.qr_matrix("https://example.com/#" + "x" * 150)
+    S = swatch.plate_size(len(m), 60)  # grown so squares are at least 1.5 mm
+    assert S > 60 and S / (len(m) + 2 * swatch.QUIET) >= swatch.MIN_MODULE_MM
     parts, cell = swatch.build_parts(m, 60, 5, style)
+    assert cell >= swatch.MIN_MODULE_MM
     total_vol = 0
     for name, mesh in parts:
         closed, vol = _mesh_ok(mesh)
         assert closed, name
         assert vol > 0, name  # faces point outwards
         xs = [v[0] for v in mesh.verts]; zs = [v[2] for v in mesh.verts]
-        assert max(xs) <= 60.0001 and min(zs) >= 0 and max(zs) <= 5.0001
+        assert max(xs) <= S + 1e-4 and min(zs) >= 0 and max(zs) <= 5.0001
         total_vol += vol
     dark = sum(map(sum, m)) * cell * cell
     if style == "two_colour":
         assert [n for n, _ in parts] == ["Swatch", "QR code (second colour)"]
         # body + inlay fill the full plate exactly
-        assert total_vol == pytest.approx(60 * 60 * 5, rel=1e-6)
+        assert total_vol == pytest.approx(S * S * 5, rel=1e-6)
         assert _mesh_ok(parts[1][1])[1] == pytest.approx(dark * swatch.INLAY_DEPTH, rel=1e-6)
     else:
-        assert total_vol == pytest.approx(60 * 60 * 5 - dark * (5 - swatch.HOLLOW_FLOOR), rel=1e-6)
+        assert total_vol == pytest.approx(S * S * 5 - dark * (5 - swatch.HOLLOW_FLOOR), rel=1e-6)
+    # a plate bigger than the minimum is kept as asked
+    assert swatch.plate_size(len(m), 150) == 150
 
 
 def test_swatch_3mf_download(client):
@@ -145,7 +150,7 @@ def test_qr_base_url_setting(client):
     pid = _calibrated_profile(client)
     assert client.put("/api/settings/qr", json={"base_url": "not a url"}).status_code == 400
     client.put("/api/settings/qr", json={"base_url": "https://example.org/ff/index.html"})
-    assert client.get(f"/api/profiles/{pid}/qr").json()["url"].startswith("https://example.org/ff/index.html#1*")
+    assert client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"].startswith("https://example.org/ff/index.html#1*")
 
 
 def test_fields_lists_match():
@@ -159,20 +164,21 @@ def test_fields_lists_match():
 @pytest.mark.parametrize("style", ["two_colour", "hollow"])
 def test_swatch_with_name_label(style):
     m = swatch.qr_matrix("https://example.com/#" + "x" * 150)
+    S = swatch.plate_size(len(m), 60)
     parts, cell = swatch.build_parts(m, 60, 5, style, "Giantarm PLA Silk Silver")
-    label_h = len(swatch.label_mask("Giantarm PLA Silk Silver", 60)) * swatch.LABEL_PX
+    label_h = len(swatch.label_mask("Giantarm PLA Silk Silver", S)) * swatch.LABEL_PX
     assert 5 < label_h < 20
     total = 0
     for name, mesh in parts:
         closed, vol = _mesh_ok(mesh)
         assert closed and vol > 0, name
         ys = [v[1] for v in mesh.verts]
-        assert min(ys) >= -1e-6 and max(ys) <= 60 + label_h + 1e-6
+        assert min(ys) >= -1e-6 and max(ys) <= S + label_h + 1e-6
         total += vol
     if style == "two_colour":
-        assert total == pytest.approx(60 * (60 + label_h) * 5, rel=1e-6)   # parts fill the plate exactly
+        assert total == pytest.approx(S * (S + label_h) * 5, rel=1e-6)   # parts fill the plate exactly
     else:
-        assert total < 60 * (60 + label_h) * 5
+        assert total < S * (S + label_h) * 5
 
 
 def test_label_fits_and_long_names_are_shortened():
@@ -192,7 +198,7 @@ def test_label_fits_and_long_names_are_shortened():
 
 def test_import_from_swatch_link(client):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     before = client.get(f"/api/profiles/{pid}").json()
     client.delete(f"/api/profiles/{pid}")
     r = client.post("/api/import-swatch-link", json={"link": "  " + url + "\n"})
@@ -229,7 +235,7 @@ def _photo_of_swatch(parts, plate_colour=(198, 198, 200), qr_colour=(70, 70, 75)
 @pytest.mark.parametrize("angle,blur", [(0, 0.5), (7, 1.2), (-12, 1.5)])
 def test_read_qr_from_a_photo_of_the_printed_swatch(client, angle, blur):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     parts, _ = swatch.build_parts(swatch.qr_matrix(url), 60, 5, "two_colour", "Giantarm PLA Silk Silver")
     photo = _photo_of_swatch(parts, angle=angle, blur=blur)
     assert swatch.read_qr(photo) == url
@@ -237,7 +243,7 @@ def test_read_qr_from_a_photo_of_the_printed_swatch(client, angle, blur):
 
 def test_scan_swatch_endpoint_imports_it(client):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     before = client.get(f"/api/profiles/{pid}").json()
     client.delete(f"/api/profiles/{pid}")
     parts, _ = swatch.build_parts(swatch.qr_matrix(url), 60, 5, "two_colour", "Giantarm")
@@ -266,7 +272,7 @@ def test_root_redirect_page_keeps_the_swatch_data():
 
 def test_swatch_check_flow(client, tmp_path):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
 
     # same profile in the app, not in Orca yet
     c = client.post("/api/swatch/check", json={"link": url}).json()
@@ -312,7 +318,7 @@ def test_swatch_check_flow(client, tmp_path):
 
 def test_swatch_check_new_filament(client):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     client.delete(f"/api/profiles/{pid}")
     c = client.post("/api/swatch/check", json={"link": url}).json()
     assert c["app"]["status"] == "missing" and c["orca"]["installed"] is False
@@ -320,3 +326,48 @@ def test_swatch_check_new_filament(client):
     assert p["sources"]["pressure_advance"] == "calibrated"
     assert client.post("/api/swatch/check", json={"link": url}).json()["app"]["status"] == "same"
     assert client.post("/api/swatch/check", json={"link": "https://x/#nonsense"}).status_code == 400
+
+
+def test_quick_scan_code_is_small_and_finds_the_profile(client, tmp_path):
+    pid = _calibrated_profile(client)
+    short = client.get(f"/api/profiles/{pid}/qr?code=short").json()
+    full = client.get(f"/api/profiles/{pid}/qr").json()  # full settings is the default
+    assert full["url"].split("#", 1)[1].startswith("1*")
+    assert "#s*Giantarm+PLA+Silk+Silver+@Snapmaker+U1*PLA+Silk*c9c9c9" in short["url"]
+    # squares are never under 1.5 mm: the plate grows to fit the code
+    assert short["module_mm"] >= 1.5 and full["module_mm"] >= 1.5
+    assert short["modules"] <= 41 and short["size_mm"] <= 71
+    assert full["modules"] > 55 and full["size_mm"] >= 100 and full["min_size_mm"] == full["size_mm"]
+    assert client.get(f"/api/profiles/{pid}/qr?size=150").json()["size_mm"] == 150
+    d = swatch.decode(short["url"].split("#", 1)[1])
+    assert d["short"] and d["name"] == "Giantarm PLA Silk Silver @Snapmaker U1"
+    assert d["settings"]["filament_type"] == "PLA Silk" and d["settings"]["default_filament_colour"].startswith("#")
+
+    # the swatch check finds it in the app (nothing to compare)
+    c = client.post("/api/swatch/check", json={"link": short["url"]}).json()
+    assert c["swatch"]["short"] and c["app"]["status"] == "same" and c["app"]["profile_id"] == pid
+    # importing it just opens the existing profile
+    assert client.post("/api/import-swatch-link", json={"link": short["url"]}).json()["id"] == pid
+    # the 3mf uses it too
+    r = client.get(f"/api/profiles/{pid}/swatch.3mf?size=60&code=short")
+    assert r.status_code == 200
+    assert client.get(f"/api/profiles/{pid}/swatch.3mf?code=nope").status_code == 400
+
+    # someone else's quick-scan swatch: it can't be added, and says why
+    client.delete(f"/api/profiles/{pid}")
+    c = client.post("/api/swatch/check", json={"link": short["url"]}).json()
+    assert c["app"] == {"status": "missing", "can_add": False}
+    r = client.post("/api/swatch/apply", json={"link": short["url"], "action": "add"})
+    assert r.status_code == 400 and "only carries the filament's name" in r.json()["error"]
+    assert client.post("/api/import-swatch-link", json={"link": short["url"]}).status_code == 400
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not installed")
+def test_scan_page_reads_quick_scan_links():
+    script = f"""
+      const FF = require({json.dumps(str(DOCS / 'ff.js'))});
+      console.log(JSON.stringify(FF.decode("#s*Giantarm+PLA+Silk+Silver+@Snapmaker+U1*PLA*C0C0C0")));
+    """
+    d = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert d["short"] and d["name"] == "Giantarm PLA Silk Silver @Snapmaker U1"
+    assert d["settings"] == {"filament_type": "PLA", "default_filament_colour": "#C0C0C0"}

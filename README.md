@@ -97,7 +97,14 @@ Photos are shrunk to 1024 px before the AI sees them, and the AI's context (how 
 
 ## QR swatches
 
-On a profile, click **Print QR swatch** to download a `.3mf` plate (60 × 60 × 5 mm by default) with a QR code on top. Scanning it with a phone opens a page showing the filament's settings, with buttons to **save or send** the `.json` or download the **VlottizFF bundle**. The whole profile is packed into the QR link itself, so it works anywhere, even with your PC off.
+On a profile, click **Print QR swatch** to download a `.3mf` plate with a QR code on top. Every square of the code is
+at least **1.5 mm**, so phones can read it off a 0.4 mm nozzle print; the plate grows to whatever size that needs
+(you can make it bigger, not smaller). Choose what the code holds:
+
+- **Full settings** (default): the whole profile is packed into the code, so anyone can scan it and save the `.json`
+  or the **VlottizFF bundle**, even with your PC off. About 65 × 65 squares: a **107 mm** plate.
+- **Quick scan**: just the filament's name, material and colour (41 × 41 squares, a **71 mm** plate). Scanning it
+  brings the filament up in *your* app; the settings stay in the app.
 
 - **Two-colour** (best scanning): the QR code is a separate 0.6 mm part. In Orca, give "QR code (second colour)" a dark filament in another toolhead.
 - **Hollowed out** (one colour): the dark squares are cut almost all the way through, so their shadows form the code.
@@ -111,7 +118,7 @@ The filament's name is printed under the code (you can change the text in the di
 - On the scan page (phone or PC): **Add to Filament Forge on this computer** opens the app and imports it, if the app is running on that computer. On a phone, **Save or send** the .json or bundle instead.
 - Or paste the link your phone shows into **Scan swatch → Paste a swatch link**.
 
-**Scanning shows nothing?** Check that the QR part was printed in a *different, darker* filament than the plate (same filament = invisible code), that GitHub Pages is turned on (below), and try scanning in good light from about 15–20 cm. Without the scan page, you can still get the profile: copy the link your phone shows, and in the app use **Filaments → Paste swatch link**.
+**Scanning shows nothing?** Reprint it: older swatches had squares under 1 mm. Print the code in a *different, darker, matte* filament than the plate (same filament = invisible code); silk and other shiny filaments reflect light and are hard to read, so use a matte plate for silk. Check that GitHub Pages is turned on (below), and try scanning in good light from about 15–20 cm. Without the scan page, you can still get the profile: copy the link your phone shows, and in the app use **Filaments → Paste swatch link**.
 
 **One-time setup:** the scan page is `docs/index.html` in this repo. Turn on GitHub Pages: repo **Settings → Pages → Deploy from a branch → main → /docs → Save**. (If it's set to `/ (root)` instead, a small redirect page sends swatch links on to `docs/`, so either works.) The page address (default `https://vlottiz.github.io/VlottizFillimentHub/`) can be changed in the QR dialog.
 
@@ -167,6 +174,34 @@ Other ways to run it (AI tab → Settings):
 - **My own Ollama:** point it at an Ollama you already run.
 
 Tips: big stores like Amazon often block apps. The maker's own page, the technical data sheet PDF, or a screenshot work best. **Remove AI files** frees the disk space again.
+
+## Printers from Orca (live)
+
+**Printers → Link from Orca** lists the printers you've set up in OrcaSlicer (the one selected in Orca now is first).
+Pick one and its toolheads, nozzle, bed size and speed limits come across, with no `printer.cfg` needed, so this works
+for any printer Orca knows (a Centauri Carbon, a Bambu, anything). After that the app **follows Orca**: change a
+filament slot or the printer's settings in Orca and the Printers page updates within a few seconds. Orca writes its
+slots to its own settings file straight away; the app only reads that file and never changes it.
+
+If you choose a toolhead in the app (after scanning a swatch), the app keeps your choice until you next change that
+printer's filaments in Orca. Pushing a filament *into* an Orca slot from the app needs Orca's plugin system
+(Orca 2.5.2 or newer); that's the next step.
+
+## Spools
+
+Each filament can have several spools, numbered **#1, #2, #3…**. Add them from **Spools → + Add spool** (or from the
+profile page, or when you scan a swatch and pick a toolhead: it asks which spool you loaded).
+
+- **Weigh**: put the spool on a kitchen scale and enter the reading. With the empty spool's weight, the app works
+  out what's really left and corrects its count. **No empty spool to weigh?** Weigh a *new* spool before using it and
+  the app works out the empty weight (reading minus the 1 kg of filament). Or, on an opened spool, weigh it before and
+  after printing: the app shows what the scale says you used next to what Orca counted, and corrects what's left.
+- **Count prints from Orca**: the Spools page shows a line to paste into Orca's process settings, under
+  **Others → Post-processing Scripts**. After every slice you export or send, Orca runs it. Filament Forge reads the
+  grams each slot uses from the G-code and takes them off the spool loaded in that toolhead. It never changes the
+  G-code. If the app is closed, the print is counted when it next starts.
+- **Recent prints**: mark a print as *didn't print* (all the filament goes back) or *failed part way* (you say how
+  far), or move it to the spool it really used.
 
 ## Backups
 
