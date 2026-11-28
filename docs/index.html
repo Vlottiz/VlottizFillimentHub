@@ -47,6 +47,21 @@
     card.innerHTML = `<p class="error">${esc(e.message)}</p>`;
     return;
   }
+  const toApp = () => { location.href = "http://127.0.0.1:8765/#swatch=" + encodeURIComponent(location.href); };
+  if (d.short) {
+    document.title = d.name;
+    card.innerHTML = `
+      <h1><span class="swatch" style="background:${esc(d.settings.default_filament_colour || "#ccc")}"></span>${esc(d.name)}</h1>
+      <div class="muted">${esc(d.settings.filament_type || "")}</div>
+      <p>This is a <b>quick-scan</b> swatch: it holds the filament's name, and its settings are in Filament Forge on the computer
+        that made it.</p>
+      <button class="primary" id="app">Open in Filament Forge on this computer</button>
+      <p class="muted" style="margin-top:6px">Opens the app if it's running on this computer, and checks the filament is in the app,
+        in Orca, and which toolhead it's loaded in. To share the settings with someone else, print a <b>full settings</b> swatch
+        or send them the .json.</p>`;
+    document.getElementById("app").onclick = toApp;
+    return;
+  }
   const s = d.settings, src = (k) => d.sources[FF.FIELDS.indexOf(k)];
   const tag = (k) => src(k) === "c" ? '<span class="cal">calibrated</span>' : src(k) === "t" ? '<span class="cal">proven</span>' : "";
   const row = (label, k, unit) => s[k] !== undefined ? `<dt>${label}</dt><dd>${esc(s[k])}${unit} ${tag(k)}</dd>` : "";
@@ -81,9 +96,7 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   };
   document.getElementById("json").onclick = () => download(jsonFile());
-  document.getElementById("app").onclick = () => {
-    location.href = "http://127.0.0.1:8765/#swatch=" + encodeURIComponent(location.href);
-  };
+  document.getElementById("app").onclick = toApp;
   document.getElementById("bundle").onclick = () => download(bundleFile());
   const share = document.getElementById("share");
   if (navigator.canShare && navigator.canShare({ files: [jsonFile()] })) {

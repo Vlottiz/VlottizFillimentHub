@@ -738,7 +738,13 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
     def qr_settings() -> dict:
         return {"base_url": swatch.DEFAULT_BASE_URL, **(db.get_setting("qr") or {})}
 
-    def qr_link(p: dict) -> str:
+    QR_CODES = ("short", "full")
+
+    def qr_link(p: dict, code: str = "short") -> str:
+        if code == "short":
+            return swatch.link(qr_settings()["base_url"], swatch.encode_short(
+                p["name"], p.get("material") or p["settings"].get("filament_type"),
+                p["settings"].get("default_filament_colour")))
         preset = preset_for(p, in_bundle=True)
         values = {k: preset[k][0] for k in orca.QR_FIELDS_V1 if k in preset}
         group = orca_group()
@@ -764,8 +770,10 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         return qr_settings()
 
     @app.get("/api/profiles/{pid}/qr")
-    def profile_qr(pid: int, size: float = 60):
-        url = qr_link(get_profile(pid))
+    def profile_qr(pid: int, size: float = 60, code: str = "short"):
+        if code not in QR_CODES:
+            raise HTTPException(400, "code must be short or full")
+        url = qr_link(get_profile(pid), code)
         try:
             matrix = swatch.qr_matrix(url)
         except ValueError:
@@ -777,14 +785,16 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
 
     @app.get("/api/profiles/{pid}/swatch.3mf")
     def profile_swatch(pid: int, style: str = "two_colour", size: float = 60, thickness: float = 5,
-                       label: str | None = None):
+                       label: str | None = None, code: str = "short"):
+        if code not in QR_CODES:
+            raise HTTPException(400, "code must be short or full")
         if style not in ("two_colour", "hollow"):
             raise HTTPException(400, "style must be two_colour or hollow")
         if not (30 <= size <= 150 and 2 <= thickness <= 15):
             raise HTTPException(400, "Size must be 30-150 mm and thickness 2-15 mm")
         p = get_profile(pid)
         text = swatch.label_text(p["name"]) if label is None else label[:80]
-        parts, _cell = swatch.build_parts(swatch.qr_matrix(qr_link(p)), size, thickness, style, text)
+        parts, _cell = swatch.build_parts(swatch.qr_matrix(qr_link(p, code)), size, thickness, style, text)
         data = swatch.to_3mf(parts, f"{p['name']} QR swatch")
         fname = orca.safe_filename(f"{p['name']} QR swatch") + ".3mf"
         return Response(data, media_type="model/3mf",
@@ -1109,6 +1119,11 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             d = swatch.decode(frag)
         except ValueError as e:
             raise HTTPException(400, f"{e}. Copy the whole link your phone shows after scanning.")
+        if d.get("short"):
+            p = _find_profile_for(d)
+            if p:
+                return {**profile_detail(p["id"]), "import": {"profile_id": p["id"], "existing": True}}
+            raise HTTPException(400, "This quick-scan swatch only carries the filament's name, so it can't add the settings. Scan it on the computer whose app made it, or ask for a full-settings swatch or the .json.")
         preset = orca.to_preset(
             f"{d['group']} {d['name']}" if d["group"] else d["name"], d["settings"], inherits=d["inherits"],
             compatible_printers=[d["printer"]] if d["printer"] else None,
@@ -1159,12 +1174,13 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                              "material": d["settings"].get("filament_type"),
                              "nozzle": d["settings"].get("nozzle_temperature"),
                              "calibrated": [k for k, v in d["sources"].items() if v in ("calibrated", "tested")]}}
+        result["swatch"]["short"] = bool(d.get("short"))
         if not p:
-            result["app"] = {"status": "missing"}
+            result["app"] = {"status": "missing", "can_add": not d.get("short")}
             copies = orca.find_copies(orca.name_variants(d["name"], orca_group()))
             result["orca"] = {"installed": bool(copies), "up_to_date": False, "copies": len(copies)}
         else:
-            diffs = _swatch_diffs(p["settings"], d["settings"])
+            diffs = [] if d.get("short") else _swatch_diffs(p["settings"], d["settings"])
             result["app"] = {"status": "different" if diffs else "same", "profile_id": p["id"],
                              "name": p["name"], "diffs": diffs}
             st = orca_status(p["id"])
@@ -1192,6 +1208,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         if body.action not in ("add", "update"):
             raise HTTPException(400, "action must be add or update")
         d = _decode_link(body.link)
+        if d.get("short"):
+            raise HTTPException(400, "This quick-scan swatch only carries the filament's name, so it can't add the settings. Scan it on the computer whose app made it, or ask for a full-settings swatch or the .json.")
         existing = _find_profile_for(d)
         if body.action == "add" and existing:
             raise HTTPException(400, "It's already in the app")
@@ -1444,19 +1462,58 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
 
     @app.post("/api/spools/{sid}/weigh")
     def weigh_spool(sid: int, body: WeighIn):
-        """You put the spool on a scale: what's left is the reading minus the empty spool."""
+        """You put the spool (filament and all) on a scale.
+
+        - Empty spool weight known: what's left = reading minus the empty spool.
+        - A new, unused spool: the empty spool weight is worked out (reading minus the full amount).
+        - Otherwise: the reading is compared with the last one. What the scale says you used is
+          checked against what Orca counted in between, and the count is corrected.
+        - First reading of a used spool: kept as the starting point for next time.
+        """
         sp = get_spool(sid)
         tare = body.tare_g if body.tare_g is not None else sp.get("tare_g")
-        if tare is None:
-            raise HTTPException(400, "Enter the empty spool's weight first (it's often on the box or the maker's site)")
-        left = spools.from_weighing(body.gross_g, tare)
-        delta = (sp["remaining_g"] or 0) - left
+        gross = round(body.gross_g, 1)
+        if gross <= 0:
+            raise HTTPException(400, "Enter what the scale reads, in grams")
+        before = sp["remaining_g"]
+        prev = db.one("SELECT * FROM usage WHERE spool_id = ? AND kind = 'weigh' AND "
+                      "json_extract(data, '$.gross_g') IS NOT NULL ORDER BY id DESC LIMIT 1", (sid,))
+        printed = db.one("SELECT COUNT(*) AS n FROM usage WHERE spool_id = ? AND kind = 'print' AND counted_g > 0",
+                         (sid,))["n"]
+        out: dict = {"gross_g": gross}
+        if tare is not None:
+            left = spools.from_weighing(gross, tare)
+            out.update(mode="tare", message=f"{left:g} g left (scale minus the {tare:g} g empty spool)")
+        elif not printed and not prev and sp.get("net_g") and before is not None and abs(before - sp["net_g"]) < 0.5:
+            tare = round(gross - sp["net_g"], 1)
+            if tare < 0:
+                raise HTTPException(400, f"That's less than the {sp['net_g']:g} g of filament a full spool has. "
+                                         "Check the scale, or set how much is on the spool with Edit.")
+            left = before
+            out.update(mode="new", message=f"New spool: the empty spool weighs about {tare:g} g. Saved for next time.")
+        elif prev:
+            scale_used = round(prev["data"]["gross_g"] - gross, 1)
+            counted = db.one("SELECT COALESCE(SUM(counted_g), 0) AS g FROM usage WHERE spool_id = ? AND "
+                             "kind = 'print' AND id > ?", (sid, prev["id"]))["g"]
+            start_left = prev["data"].get("left_after")
+            left = round(max(0.0, (start_left if start_left is not None else (before or 0) + counted) - scale_used), 1)
+            out.update(mode="compare", scale_used_g=scale_used, counted_g=round(counted, 1),
+                       off_g=round(scale_used - counted, 1),
+                       message=f"Since the last weigh: the scale says {scale_used:g} g used, Orca counted {counted:.1f} g")
+        else:
+            left = before
+            out.update(mode="baseline", message="Saved as a starting point. Weigh it again after printing: "
+                                                "the app compares the scale with what Orca counted.")
+        if left is None:
+            left = before
+        delta = round((before or 0) - (left or 0), 2) if before is not None and left is not None else 0.0
         db.insert("usage", {"spool_id": sid, "profile_id": sp["profile_id"], "kind": "weigh",
-                            "job": f"Weighed {body.gross_g:g} g", "grams": delta, "counted_g": delta,
-                            "data": {"gross_g": body.gross_g, "tare_g": tare, "expected_g": sp["remaining_g"]}})
+                            "job": f"Weighed {gross:g} g", "grams": delta, "counted_g": delta,
+                            "data": {"gross_g": gross, "tare_g": tare, "expected_g": before, "left_after": left,
+                                     "mode": out["mode"]}})
         db.update("spools", sid, {"remaining_g": left, "tare_g": tare,
-                                  "status": "empty" if left < 1 else sp["status"]})
-        return {**spool_view(get_spool(sid)), "difference_g": round(delta, 1)}
+                                  "status": "empty" if left is not None and left < 1 else sp["status"]})
+        return {**spool_view(get_spool(sid)), **out, "difference_g": round(delta, 1)}
 
     @app.delete("/api/spools/{sid}")
     def delete_spool(sid: int):

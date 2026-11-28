@@ -307,9 +307,12 @@ async function swatchCheck(link) {
 
   const draw = () => {
     const sw = c.swatch, a = c.app, o = c.orca;
-    const appBody = a.status === "missing" ? `<p>Not in Filament Forge yet.</p>
-        <div class="actions"><button type="button" class="primary" data-sc="add">Add it to the app</button></div>`
-      : a.status === "same" || st.app ? `<p>In the app${a.status === "same" ? ", with the same values as the swatch" : ""}.</p>`
+    const appBody = a.status === "missing" ? (a.can_add === false
+        ? `<p>This is a quick-scan swatch, which only holds the name, and <b>${esc(sw.name.split(" @")[0])}</b> isn't in this app.
+            It was made on another computer: ask for a full-settings swatch or the profile's .json.</p>`
+        : `<p>Not in Filament Forge yet.</p>
+        <div class="actions"><button type="button" class="primary" data-sc="add">Add it to the app</button></div>`)
+      : a.status === "same" || st.app ? `<p>In the app${a.status === "same" && !sw.short ? ", with the same values as the swatch" : ""}.</p>`
       : `<p>In the app, but these values are different from the swatch:</p>
         <table class="settings changes">${a.diffs.map((d) => `<tr><td>${esc(d.label)}</td>
           <td class="nowrap">app <b>${esc(d.app ?? "—")}</b> · swatch <b>${esc(d.swatch ?? "—")}</b></td></tr>`).join("")}</table>
@@ -697,17 +700,20 @@ function todoPanel(p) {
 
 async function qrDialog(p) {
   const qs = await api("/api/settings/qr");
-  let size = 60, style = "two_colour", thickness = 5;
+  let size = 60, style = "two_colour", thickness = 5, code = "short";
   const form = openDialog(`<h2>Print a QR swatch</h2>
-    <p class="small muted">A plate with a QR code on top. Scanning it with a phone opens this profile and lets you save the
-      <b>.json</b> or <b>VlottizFF bundle</b>, or send it to someone. The profile is stored in the code itself, so it works anywhere.</p>
+    <p class="small muted">A plate with a QR code on top. Scan it with your phone or the app's <b>Scan swatch</b> to bring this
+      filament up: is it in the app, is it in Orca, and which toolhead is it in.</p>
     <div class="qr-wrap"><div id="qr-img" class="qr-img"></div>
       <div style="flex:1;min-width:220px">
+        <div><label>What the code holds</label><select name="code">
+          <option value="short">Quick scan: the name (small code, scans easily)</option>
+          <option value="full">Full settings: works on anyone's phone or app (much bigger code)</option></select></div>
         <div class="row two">
           <div><label>Style</label><select name="style">
             <option value="two_colour">Two-colour (best scanning)</option>
             <option value="hollow">Hollowed out (one colour)</option></select></div>
-          <div><label>Size (mm)</label><input name="size" type="number" min="40" max="120" step="5" value="60"></div>
+          <div><label>Size (mm)</label><input name="size" type="number" min="40" max="150" step="5" value="60"></div>
           <div><label>Thickness (mm)</label><input name="thickness" type="number" min="2" max="10" step="0.5" value="5"></div>
         </div>
         <div><label>Text printed under the code (blank for none)</label><input name="label" maxlength="80"></div>
@@ -725,20 +731,26 @@ async function qrDialog(p) {
       <div class="actions"><button type="button" id="qr-base-save">Save address</button></div>
     </details>`, () => {});
   const tips = {
-    two_colour: "Important: in Orca, give the “QR code and name (second colour)” part a dark filament in another toolhead (it's the top 0.6 mm). If both parts use the same filament, the code is invisible.",
+    two_colour: "In Orca, give the “QR code and name (second colour)” part a dark matte filament in another toolhead. Phones read best with a matte, light base: silk and other shiny filaments reflect light and make the code hard to read, so if this filament is silk, try a white or grey matte plate with a small strip of the silk on the side. Turn ironing off for the top.",
     hollow: "One colour: the dark squares are cut almost all the way through, so their shadows make the code. Scan in even light; a lighter filament works best.",
   };
   const refresh = guard(async () => {
+    if (form.elements.code.value !== code) {  // a full code needs a bigger plate
+      code = form.elements.code.value;
+      form.elements.size.value = code === "full" ? 90 : 60;
+    }
     size = Number(form.elements.size.value) || 60;
     style = form.elements.style.value;
     thickness = Number(form.elements.thickness.value) || 5;
-    const q = await api(`/api/profiles/${p.id}/qr?size=${size}`);
+    const q = await api(`/api/profiles/${p.id}/qr?size=${size}&code=${code}`);
     if (form.elements.label.dataset.init !== "1") { form.elements.label.value = q.label; form.elements.label.dataset.init = "1"; }
     $("#qr-img", form).innerHTML = q.svg;
+    const need = Math.ceil((1.3 * (q.modules + 6)) / 5) * 5;  // 1.3 mm squares scan reliably off a 0.4 mm nozzle
     $("#qr-info", form).innerHTML = `${q.modules}×${q.modules} QR, <b>${q.module_mm} mm</b> per square
-      ${q.module_mm < 0.8 ? `<span style="color:var(--warn)">: small for a 0.4 nozzle; try ${Math.ceil(0.85 * (q.modules + 4) / 5) * 5} mm</span>` : ""}`;
+      ${q.module_mm < 1.2 ? `<span style="color:var(--bad)">: too small for phones to read off a print. Make it ${need} mm${code === "full" ? ", or use Quick scan" : ""}.</span>`
+        : `<span style="color:var(--good)">: good size for scanning</span>`}`;
     $("#qr-style-tip", form).textContent = tips[style];
-    $("#qr-dl", form).href = `/api/profiles/${p.id}/swatch.3mf?style=${style}&size=${size}&thickness=${thickness}` +
+    $("#qr-dl", form).href = `/api/profiles/${p.id}/swatch.3mf?style=${style}&size=${size}&thickness=${thickness}&code=${code}` +
       `&label=${encodeURIComponent(form.elements.label.value)}`;
     $("#qr-open", form).href = q.url;
   });
@@ -1358,14 +1370,30 @@ function weighDialog(sp) {
   openDialog(`<h2>Weigh ${esc(sp.label)}</h2>
     <p class="muted">Put the spool on the scale, filament and all. Enter what it reads.</p>
     <div class="row"><div><label>Scale reading (g)</label><input name="gross" type="text" inputmode="decimal" required autofocus></div>
-      <div><label>Empty spool weight (g)</label><input name="tare" type="text" inputmode="decimal" value="${esc(sp.tare_g ?? "")}" placeholder="needed once"></div></div>
-    <p class="small muted">The app thinks ${spoolLeft(sp)}. Weighing corrects it.</p>
+      <div><label>Empty spool weight (g)</label><input name="tare" type="text" inputmode="decimal" value="${esc(sp.tare_g ?? "")}" placeholder="if you know it"></div></div>
+    <p class="small muted">The app thinks ${spoolLeft(sp)}. No empty spool to weigh? Leave that box blank:
+      weigh a <b>new</b> spool before using it and the app works out the empty weight, or weigh before and after printing and
+      the app checks the scale against what Orca counted.</p>
     <div class="actions"><button class="primary" value="save">Save</button><button value="cancel" formnovalidate>Cancel</button></div>`,
   async (fd) => {
     const n = (v) => (String(v ?? "").trim() === "" ? null : Number(String(v).replace(",", ".")));
     const r = await api(`/api/spools/${sp.id}/weigh`, { json: { gross_g: n(fd.get("gross")), tare_g: n(fd.get("tare")) } });
-    toast(`${Math.round(r.remaining_g)} g left` + (Math.abs(r.difference_g) >= 1 ? ` (${r.difference_g > 0 ? r.difference_g + " g less" : -r.difference_g + " g more"} than counted)` : ""));
     renderSpools();
+    if (r.mode === "compare") {
+      const off = r.off_g, pct = r.counted_g ? Math.round((100 * off) / r.counted_g) : null;
+      openDialog(`<h2>${esc(sp.label)}: scale vs Orca</h2>
+        <dl class="kv"><dt>Scale says you used</dt><dd><b>${r.scale_used_g} g</b></dd>
+          <dt>Orca counted</dt><dd><b>${r.counted_g} g</b></dd>
+          <dt>Difference</dt><dd>${off > 0 ? "+" : ""}${off} g${pct != null ? ` (${pct > 0 ? "+" : ""}${pct}%)` : ""}</dd>
+          <dt>Left now</dt><dd><b>${spoolLeft(r)}</b></dd></dl>
+        <p class="small muted">${!r.counted_g ? "Orca counted nothing in between: check the post-processing hook is set in the process you print with."
+          : Math.abs(pct) <= 5 ? "Orca's count is close. Nothing to fix."
+          : off > 0 ? "You used more than Orca counted: failed prints, purges or tests you didn't export. Mark failed prints on the Spools page, and check the filament's density in Orca."
+          : "You used less than Orca counted: prints you exported but didn't print. Mark them as didn't print on the Spools page."}</p>
+        <div class="actions"><button value="cancel" formnovalidate>OK</button></div>`, () => {});
+      return false;  // keep the dialog open: it now shows the comparison
+    }
+    toast(r.message || `${Math.round(r.remaining_g)} g left`);
   });
 }
 

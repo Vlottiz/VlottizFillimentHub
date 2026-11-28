@@ -19,12 +19,19 @@
 
   function decode(fragment) {
     const parts = String(fragment || "").replace(/^#/, "").split("*").map(dec);
+    if (parts[0] === "s") {  // quick-scan swatch: just the name, material and colour
+      if (!parts[1]) throw new Error("This link is incomplete. Try scanning again.");
+      const settings = {};
+      if (parts[2]) settings.filament_type = parts[2];
+      if (parts[3]) settings.default_filament_colour = "#" + parts[3];
+      return { short: true, name: parts[1], group: "", inherits: "", printer: "", settings, sources: "" };
+    }
     if (parts[0] !== "1") throw new Error("This isn't a Filament Forge swatch link (or it's from a newer version).");
     if (parts.length !== 5 + FIELDS.length + 1) throw new Error("This link is incomplete. Try scanning again.");
     const [, name, group, inherits, printer] = parts;
     const settings = {};
     FIELDS.forEach((k, i) => { if (parts[5 + i] !== "") settings[k] = parts[5 + i]; });
-    return { name, group, inherits, printer, settings, sources: parts[parts.length - 1] };
+    return { short: false, name, group, inherits, printer, settings, sources: parts[parts.length - 1] };
   }
 
   function notes(d) {

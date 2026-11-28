@@ -45,9 +45,31 @@ def encode(name: str, group: str, inherits: str, printer: str, settings: dict, s
     return "*".join(_enc(p) for p in parts)
 
 
+def encode_short(name: str, material: str | None, colour: str | None) -> str:
+    """Quick-scan code: just enough to find the profile in the app (about a third of the full code).
+
+    Fewer characters means a QR code with far fewer squares, so each square prints bigger
+    and phones read it easily. The settings stay in the app.
+    """
+    parts = ["s", name, material or "", (colour or "").lstrip("#")]
+    return "*".join(_enc(p) for p in parts)
+
+
 def decode(fragment: str) -> dict:
     """Python twin of docs/ff.js decode(); used by the importer and tests."""
     parts = [unquote_plus(p) for p in fragment.lstrip("#").split("*")]
+    if parts and parts[0] == "s":
+        if len(parts) < 2 or not parts[1].strip():
+            raise ValueError("QR link is incomplete")
+        material = parts[2] if len(parts) > 2 else ""
+        colour = parts[3] if len(parts) > 3 else ""
+        settings = {}
+        if material:
+            settings["filament_type"] = material
+        if colour:
+            settings["default_filament_colour"] = "#" + colour
+        return {"short": True, "name": parts[1], "group": "", "inherits": "", "printer": "",
+                "settings": settings, "sources": {}}
     if not parts or parts[0] != "1":
         raise ValueError("Not a Filament Forge QR link (or a newer version)")
     n = len(orca.QR_FIELDS_V1)
@@ -58,7 +80,7 @@ def decode(fragment: str) -> dict:
     settings = {k: orca._parse_scalar(v) for k, v in zip(orca.QR_FIELDS_V1, vals) if v != ""}
     settings = {k: v for k, v in settings.items() if v is not None}
     sources = orca.read_sources_tag(f"[ff1:{parts[-1]}]", settings)
-    return {"name": name, "group": group, "inherits": inherits, "printer": printer,
+    return {"short": False, "name": name, "group": group, "inherits": inherits, "printer": printer,
             "settings": settings, "sources": sources}
 
 

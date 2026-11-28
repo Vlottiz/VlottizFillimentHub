@@ -36,7 +36,7 @@ def _calibrated_profile(client):
 
 def test_link_round_trip_python(client):
     pid = _calibrated_profile(client)
-    q = client.get(f"/api/profiles/{pid}/qr").json()
+    q = client.get(f"/api/profiles/{pid}/qr?code=full").json()
     assert q["url"].startswith("https://vlottiz.github.io/VlottizFillimentHub/#1*")
     d = swatch.decode(q["url"].split("#", 1)[1])
     assert d["name"] == "Giantarm PLA Silk Silver @Snapmaker U1" and d["group"] == "VlottizFF"
@@ -52,7 +52,7 @@ def test_link_round_trip_python(client):
 def test_scan_page_rebuilds_the_same_preset_as_the_app(client):
     """docs/ff.js (what the phone runs) must produce exactly the app's export."""
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     app_json = client.get(f"/api/profiles/{pid}/preview").json()
     app_bundle = zipfile.ZipFile(io.BytesIO(client.get("/api/export-bundle").content))
     app_bundle_preset = json.loads(app_bundle.read([n for n in app_bundle.namelist() if n != "bundle_structure.json"][0]))
@@ -145,7 +145,7 @@ def test_qr_base_url_setting(client):
     pid = _calibrated_profile(client)
     assert client.put("/api/settings/qr", json={"base_url": "not a url"}).status_code == 400
     client.put("/api/settings/qr", json={"base_url": "https://example.org/ff/index.html"})
-    assert client.get(f"/api/profiles/{pid}/qr").json()["url"].startswith("https://example.org/ff/index.html#1*")
+    assert client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"].startswith("https://example.org/ff/index.html#1*")
 
 
 def test_fields_lists_match():
@@ -192,7 +192,7 @@ def test_label_fits_and_long_names_are_shortened():
 
 def test_import_from_swatch_link(client):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     before = client.get(f"/api/profiles/{pid}").json()
     client.delete(f"/api/profiles/{pid}")
     r = client.post("/api/import-swatch-link", json={"link": "  " + url + "\n"})
@@ -229,7 +229,7 @@ def _photo_of_swatch(parts, plate_colour=(198, 198, 200), qr_colour=(70, 70, 75)
 @pytest.mark.parametrize("angle,blur", [(0, 0.5), (7, 1.2), (-12, 1.5)])
 def test_read_qr_from_a_photo_of_the_printed_swatch(client, angle, blur):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     parts, _ = swatch.build_parts(swatch.qr_matrix(url), 60, 5, "two_colour", "Giantarm PLA Silk Silver")
     photo = _photo_of_swatch(parts, angle=angle, blur=blur)
     assert swatch.read_qr(photo) == url
@@ -237,7 +237,7 @@ def test_read_qr_from_a_photo_of_the_printed_swatch(client, angle, blur):
 
 def test_scan_swatch_endpoint_imports_it(client):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     before = client.get(f"/api/profiles/{pid}").json()
     client.delete(f"/api/profiles/{pid}")
     parts, _ = swatch.build_parts(swatch.qr_matrix(url), 60, 5, "two_colour", "Giantarm")
@@ -266,7 +266,7 @@ def test_root_redirect_page_keeps_the_swatch_data():
 
 def test_swatch_check_flow(client, tmp_path):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
 
     # same profile in the app, not in Orca yet
     c = client.post("/api/swatch/check", json={"link": url}).json()
@@ -312,7 +312,7 @@ def test_swatch_check_flow(client, tmp_path):
 
 def test_swatch_check_new_filament(client):
     pid = _calibrated_profile(client)
-    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    url = client.get(f"/api/profiles/{pid}/qr?code=full").json()["url"]
     client.delete(f"/api/profiles/{pid}")
     c = client.post("/api/swatch/check", json={"link": url}).json()
     assert c["app"]["status"] == "missing" and c["orca"]["installed"] is False
@@ -320,3 +320,45 @@ def test_swatch_check_new_filament(client):
     assert p["sources"]["pressure_advance"] == "calibrated"
     assert client.post("/api/swatch/check", json={"link": url}).json()["app"]["status"] == "same"
     assert client.post("/api/swatch/check", json={"link": "https://x/#nonsense"}).status_code == 400
+
+
+def test_quick_scan_code_is_small_and_finds_the_profile(client, tmp_path):
+    pid = _calibrated_profile(client)
+    short = client.get(f"/api/profiles/{pid}/qr").json()  # quick scan is the default
+    full = client.get(f"/api/profiles/{pid}/qr?code=full").json()
+    assert "#s*Giantarm+PLA+Silk+Silver+@Snapmaker+U1*PLA+Silk*c9c9c9" in short["url"]
+    # few enough squares to print at 1.2 mm+ on a 60 mm plate; the full code isn't
+    assert short["modules"] <= 41 and short["module_mm"] >= 1.2
+    assert full["modules"] > 55 and full["module_mm"] < 1.0
+    d = swatch.decode(short["url"].split("#", 1)[1])
+    assert d["short"] and d["name"] == "Giantarm PLA Silk Silver @Snapmaker U1"
+    assert d["settings"]["filament_type"] == "PLA Silk" and d["settings"]["default_filament_colour"].startswith("#")
+
+    # the swatch check finds it in the app (nothing to compare)
+    c = client.post("/api/swatch/check", json={"link": short["url"]}).json()
+    assert c["swatch"]["short"] and c["app"]["status"] == "same" and c["app"]["profile_id"] == pid
+    # importing it just opens the existing profile
+    assert client.post("/api/import-swatch-link", json={"link": short["url"]}).json()["id"] == pid
+    # the 3mf uses it too
+    r = client.get(f"/api/profiles/{pid}/swatch.3mf?size=60")
+    assert r.status_code == 200
+    assert client.get(f"/api/profiles/{pid}/swatch.3mf?code=nope").status_code == 400
+
+    # someone else's quick-scan swatch: it can't be added, and says why
+    client.delete(f"/api/profiles/{pid}")
+    c = client.post("/api/swatch/check", json={"link": short["url"]}).json()
+    assert c["app"] == {"status": "missing", "can_add": False}
+    r = client.post("/api/swatch/apply", json={"link": short["url"], "action": "add"})
+    assert r.status_code == 400 and "only carries the filament's name" in r.json()["error"]
+    assert client.post("/api/import-swatch-link", json={"link": short["url"]}).status_code == 400
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not installed")
+def test_scan_page_reads_quick_scan_links():
+    script = f"""
+      const FF = require({json.dumps(str(DOCS / 'ff.js'))});
+      console.log(JSON.stringify(FF.decode("#s*Giantarm+PLA+Silk+Silver+@Snapmaker+U1*PLA*C0C0C0")));
+    """
+    d = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert d["short"] and d["name"] == "Giantarm PLA Silk Silver @Snapmaker U1"
+    assert d["settings"] == {"filament_type": "PLA", "default_filament_colour": "#C0C0C0"}

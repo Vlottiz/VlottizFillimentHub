@@ -172,9 +172,7 @@ def test_spools_numbered_weighed_and_used(client):
     # weigh: 980 g on the scale with a 180 g spool = 800 g left
     w = client.post(f"/api/spools/{s1}/weigh", json={"gross_g": 980}).json()
     assert w["remaining_g"] == 800 and w["difference_g"] == 200 and w["percent"] == 80
-    # weighing needs the empty spool weight
     s3 = third["id"]
-    assert client.post(f"/api/spools/{s3}/weigh", json={"gross_g": 900}).status_code == 400
     # set it empty and it drops off the active list
     client.put(f"/api/spools/{s3}", json={"status": "empty"})
     assert s3 not in [s["id"] for s in client.get("/api/spools").json()]
@@ -203,3 +201,28 @@ def test_report_cli_when_app_is_closed(tmp_path, monkeypatch):
     saved = json.loads((tmp_path / "pending_usage.jsonl").read_text().splitlines()[0])
     assert saved["job"] == "Benchy_PLA" and saved["usage"]["total_g"] == 15.55
     assert g.read_text() == GCODE  # never touches the G-code
+
+
+def test_weigh_without_empty_spool_weight(client):
+    prof = _profile(client)
+    new, used = client.post("/api/spools", json={"profile_id": prof["id"], "count": 2}).json()
+
+    # a brand-new spool: the empty spool weight is worked out
+    r = client.post(f"/api/spools/{new['id']}/weigh", json={"gross_g": 1185}).json()
+    assert r["mode"] == "new" and r["tare_g"] == 185 and r["remaining_g"] == 1000
+    # a new spool can't weigh less than its filament
+    assert client.post(f"/api/spools/{used['id']}/weigh", json={"gross_g": 900}).status_code == 400
+
+    # an opened spool with no empty weight: before, print, after
+    client.put(f"/api/spools/{used['id']}", json={"remaining_g": 640})
+    r = client.post(f"/api/spools/{used['id']}/weigh", json={"gross_g": 850}).json()
+    assert r["mode"] == "baseline" and r["remaining_g"] == 640
+    client.put("/api/printers/1/toolheads/1", json={"profile_id": prof["id"], "spool_id": used["id"]})
+    client.post("/api/usage/report", json={"job": "vase", "usage": spools.parse_usage(GCODE)})  # 12.34 g on T1
+    assert {s["id"]: s for s in client.get("/api/spools").json()}[used["id"]]["remaining_g"] == pytest.approx(627.66)
+    r = client.post(f"/api/spools/{used['id']}/weigh", json={"gross_g": 836.5}).json()
+    assert r["mode"] == "compare" and r["scale_used_g"] == 13.5 and r["counted_g"] == 12.3
+    assert r["off_g"] == pytest.approx(1.2) and r["remaining_g"] == 626.5  # 640 at the first weigh, minus 13.5
+    # with the empty weight known it's a plain subtraction again
+    r = client.post(f"/api/spools/{used['id']}/weigh", json={"gross_g": 836.5, "tare_g": 200}).json()
+    assert r["mode"] == "tare" and r["remaining_g"] == 636.5
