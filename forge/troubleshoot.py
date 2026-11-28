@@ -129,7 +129,8 @@ ISSUES: dict[str, dict] = {
         "title": "Ringing / ghosting",
         "looks_like": "ripples or faint echoes that start right after a corner, hole or letter and fade out along the wall",
         "changes": [],
-        "process": [("Outer wall acceleration", "2000–3000 mm/s²", "Gentler direction changes shake the toolhead less.")],
+        "process": [("Outer wall acceleration", "2000–3000 mm/s²", "Gentler direction changes shake the toolhead less.",
+                     "outer_wall_acceleration", 2500)],
         "tips": ["Make sure input shaping is calibrated on the printer.", "Check the belts are tight."],
     },
     "vfa": {
@@ -137,9 +138,27 @@ ISSUES: dict[str, dict] = {
         "looks_like": "fine, evenly spaced vertical ripples or a corduroy / wavy texture across smooth walls, "
                       "most visible on curved shiny surfaces under side light",
         "changes": [],
-        "process": [("Outer wall speed", "{vfa_speed}", "Prints walls at the speed your VFA test found smoothest.")],
+        "process": [("Outer wall speed", "{vfa_speed}", "Prints walls at the speed your VFA test found smoothest.",
+                     "outer_wall_speed", "{vfa_speed}")],
         "tips": ["Vertical fine artifacts come from the motors at certain speeds, not the filament.",
                  "Run the VFA calibration if you haven't: the smoothest band gives the outer wall speed to use."],
+    },
+    "rough_walls": {
+        "title": "Rough / uneven walls",
+        "looks_like": "lumpy, wavy or uneven outer walls with layers bulging in and out, while the top and bottom "
+                      "surfaces look and feel fine",
+        "changes": [
+            ("nozzle_temperature", "add", 10, "Hotter plastic flows more evenly when walls print fast."),
+            ("filament_max_volumetric_speed", "mul", 0.85, "Caps how fast walls can go so the hotend keeps up."),
+        ],
+        "process": [
+            ("Outer wall speed", "60–80 mm/s", "Slow, steady outer walls hide uneven filament.", "outer_wall_speed", 70),
+            ("Inner wall speed", "80–100 mm/s", "Keeps inner walls from starving the outer ones.", "inner_wall_speed", 90),
+        ],
+        "tips": ["Test: print a 20 mm cube with the trial. Smooth walls = it was speed/temperature.",
+                 "Still lumpy at random heights? Measure the filament diameter at ~10 spots; big swings mean a poor spool.",
+                 "Lumps repeating at the same spacing are the Z axis (check the lead screws), not the filament.",
+                 "Dry the spool: damp filament extrudes unevenly."],
     },
     "z_banding": {
         "title": "Z-banding (horizontal bands)",
@@ -181,6 +200,7 @@ LIMITS = {
 # strongly: you can see the print, the model only sees a photo.
 KEYWORDS = {
     "stringing": r"string|hair|web|wisp|cobweb|ooz",
+    "rough_walls": r"(rough|lumpy|bumpy|uneven|wavy|messy|ugly).{0,20}wall|wall.{0,20}(rough|lumpy|bumpy|uneven|wavy|messy)",
     "vfa": r"\bvfa\b|wavy|wave|ripple|corduroy|vertical (line|stripe)|salmon",
     "ringing": r"ringing|ghost|echo",
     "z_banding": r"band|horizontal line|z.?wobble|layer lines? (stand out|visible)",
@@ -328,16 +348,28 @@ def diagnose_with_ai(chat, description: str, images: list[bytes], material: str 
 
 
 def process_suggestions(issue_ids: list[str], context: dict | None = None) -> list[dict]:
-    """Print (process) settings to change in Orca; the app can't change these itself."""
+    """Print (process) settings to change in Orca; the app can't change these itself.
+
+    Wall ones carry `key` and `number`, so a trial profile can keep them in its Walls section.
+    """
     context = context or {}
-    out = []
+    out, seen = [], set()
     for iid in issue_ids:
-        for setting, value, why in ISSUES.get(iid, {}).get("process", []):
+        for setting, value, why, *rest in ISSUES.get(iid, {}).get("process", []):
+            key, number = (rest + [None, None])[:2]
             if "{vfa_speed}" in value:
                 v = context.get("vfa_speed")
                 value = f"{int(round(v))} mm/s (your VFA test)" if v else \
                     "the speed of your VFA test's smoothest band (run the VFA calibration)"
-            out.append({"setting": setting, "value": value, "why": why, "issue": iid})
+                number = int(round(v)) if v else None
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            item = {"setting": setting, "value": value, "why": why, "issue": iid}
+            if key and isinstance(number, (int, float)):
+                item.update(key=key, number=number, current=(context.get("walls") or {}).get(key))
+            out.append(item)
     return out
 
 

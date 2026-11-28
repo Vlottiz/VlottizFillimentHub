@@ -390,9 +390,12 @@ def read_sources_tag(notes: str, settings: dict) -> dict:
     return out
 
 
-def notes_for(settings: dict, sources: dict, calibrations: list[dict] | None = None) -> str:
+def notes_for(settings: dict, sources: dict, calibrations: list[dict] | None = None,
+              walls_line: str | None = None) -> str:
     """Readable notes for Orca's Notes tab, ending with the machine-readable tag."""
     lines = ["Made with Filament Forge."]
+    if walls_line:
+        lines.append(walls_line)
     cal = [k for k in QR_FIELDS_V1 if sources.get(k) == "calibrated" and k in settings]
     if cal:
         lines.append("Calibrated: " + ", ".join(f"{k} {_fmt(settings[k])}" for k in cal))

@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import calibration, klipper, materials, orca, paths, swatch, troubleshoot, tuning
+from . import walls as wallmod
 from .ai import extract as ai_extract
 from .ai.images import shrink as shrink_image
 from .ai.runtime import CONTEXT_CHOICES, OllamaManager
@@ -121,7 +122,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         return orca.to_preset(
             name, settings, material=profile.get("material"),
             inherits=profile.get("inherits"), compatible_printers=compat_for(profile),
-            notes=orca.notes_for(profile["settings"], profile.get("sources") or {}),
+            notes=orca.notes_for(profile["settings"], profile.get("sources") or {},
+                                 walls_line=wallmod.notes_line(profile.get("walls"))),
         )
 
     # ------------------------------------------------------------------- meta
@@ -137,6 +139,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             "tests": calibration.tests_for_ui(),
             "orca_config_dir": str(root) if root else None,
             "data_dir": str(DATA_DIR),
+            "wall_fields": [{"key": k, "label": l, "unit": u, "min": lim[0], "max": lim[1], "where": w}
+                            for k, l, u, lim, w in wallmod.FIELDS],
             "orca_config_exists": bool(root and root.is_dir()),
             "orca_filament_dirs": [str(d) for d in orca.install_dirs()],
             "orca_active_dir": str(orca.active_user_dir() or ""),
@@ -301,6 +305,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         p["speed"] = tuning.speed_hint(p["settings"], printer)
         p["versions"] = db.all(
             "SELECT id, reason, created FROM profile_versions WHERE profile_id = ? ORDER BY id DESC", (pid,))
+        p["walls"] = wallmod.normalise(p.get("walls"))
+        p["wall_check"] = wallmod.flow_check(p["walls"], p["settings"], printer)
         p["troubleshoots"] = [_session_view(t) for t in db.all(
             "SELECT * FROM troubleshoots WHERE profile_id = ? OR trial_profile_id = ? ORDER BY id DESC", (pid, pid))]
         if p.get("trial_of"):
@@ -342,6 +348,25 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                     changed.append(k)
             if changed:
                 db.set_profile_settings(pid, settings, sources, "Edited: " + ", ".join(changed))
+        return profile_detail(pid)
+
+    class WallsIn(BaseModel):
+        values: dict = {}
+        note: str | None = None
+
+    @app.put("/api/profiles/{pid}/walls")
+    def set_walls(pid: int, body: WallsIn):
+        """Wall speeds etc. for this filament (applied in Orca's print settings)."""
+        p = get_profile(pid)
+        try:
+            w, changed = wallmod.apply(p.get("walls"), body.values, "manual")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if body.note is not None:
+            w["note"] = body.note.strip()[:500]
+        db.update("profiles", pid, {"walls": w, "updated": time.time()})
+        if changed:
+            db.save_profile_version(pid, "Walls: " + ", ".join(changed))
         return profile_detail(pid)
 
     class ConfirmIn(BaseModel):
@@ -390,7 +415,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
 
     def _troubleshoot_context(pid: int) -> dict:
         """Things the suggestions can use, e.g. the speed your VFA test found smoothest."""
-        ctx = {}
+        prof = db.one("SELECT walls FROM profiles WHERE id = ?", (pid,))
+        ctx = {"walls": wallmod.normalise((prof or {}).get("walls"))["values"]}
         for c in db.all("SELECT * FROM calibrations WHERE profile_id = ? AND test = 'vfa' ORDER BY id DESC", (pid,)):
             try:
                 ctx["vfa_speed"] = calibration.compute("vfa", c["inputs"], {})["extra"]["_speed"]
@@ -465,7 +491,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         sess = db.one("SELECT * FROM troubleshoots WHERE id = ?", (sid,))
         if not sess:
             raise HTTPException(404, "Not found")
-        if not sess["changes"]:
+        if not sess["changes"] and not any(x.get("key") for x in (sess["diagnosis"].get("process") or [])):
             raise HTTPException(400, "There are no setting changes to try for this problem")
         if sess.get("trial_profile_id") and db.one("SELECT id FROM profiles WHERE id = ?", (sess["trial_profile_id"],)):
             return profile_detail(sess["trial_profile_id"])
@@ -474,18 +500,21 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         for c in sess["changes"]:
             settings[c["key"]] = c["new"]
             sources[c["key"]] = "manual"
+        wall_changes = {x["key"]: x["number"] for x in (sess["diagnosis"].get("process") or []) if x.get("key")}
+        trial_walls, _ = wallmod.apply(p.get("walls"), wall_changes, "fix") if wall_changes else (p.get("walls"), [])
         first = (sess["diagnosis"].get("issues") or [{}])[0].get("id", "fix")
         label = troubleshoot.ISSUES.get(first, {}).get("title", "fix").split(" /")[0].lower()
         now = time.time()
         tid = db.insert("profiles", {
             "filament_id": p["filament_id"], "printer_id": p["printer_id"], "trial_of": p["id"],
             "name": f"{p['name']} (trial: {label})", "material": p["material"], "inherits": p["inherits"],
-            "settings": settings, "sources": sources,
+            "settings": settings, "sources": sources, "walls": wallmod.normalise(trial_walls),
             "notes": [f"Trial copy of '{p['name']}' to fix: {label}. Print with it, then say if it's better."],
             "created": now, "updated": now,
         })
-        db.save_profile_version(tid, "Trial created: " + ", ".join(f"{c['key']} {c['old']} -> {c['new']}"
-                                                                    for c in sess["changes"]))
+        db.save_profile_version(tid, "Trial created: " + ", ".join(
+            [f"{c['key']} {c['old']} -> {c['new']}" for c in sess["changes"]] +
+            [f"{k} -> {v}" for k, v in wall_changes.items()]))
         db.update("troubleshoots", sid, {"trial_profile_id": tid, "status": "trial", "updated": now})
         return profile_detail(tid)
 
@@ -512,7 +541,12 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                 if k in t["settings"]:
                     settings[k] = t["settings"][k]
                     sources[k] = "tested"
-            db.set_profile_settings(orig["id"], settings, sources, "Fix confirmed in a print: " + ", ".join(keys))
+            wall_keys = [x["key"] for x in ((sess or {}).get("diagnosis") or {}).get("process", []) if x.get("key")]
+            tw = wallmod.normalise(t.get("walls"))["values"]
+            if wall_keys:
+                ow, _ = wallmod.apply(orig.get("walls"), {k: tw[k] for k in wall_keys if k in tw}, "tested")
+                db.update("profiles", orig["id"], {"walls": ow})
+            db.set_profile_settings(orig["id"], settings, sources, "Fix confirmed in a print: " + ", ".join(keys + wall_keys))
             db.delete("profiles", tid)
             if sess:
                 db.update("troubleshoots", sess["id"], {"status": "fixed", "updated": now})
@@ -568,6 +602,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             "filament_id": p["filament_id"], "printer_id": p["printer_id"],
             "name": p["name"] + " (copy)", "material": p["material"], "inherits": p["inherits"],
             "settings": p["settings"], "sources": p["sources"], "notes": p["notes"],
+            "walls": wallmod.normalise(p.get("walls")),
             "created": now, "updated": now,
         })
         db.save_profile_version(new_id, f"Copied from profile #{pid}")
@@ -821,6 +856,13 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                     pr["data"]["hotend_max_flow"] = measured
                     db.update("printers", pr["id"], {"data": pr["data"]})
 
+        # VFA: the smoothest speed becomes this filament's outer wall speed (unless "not sure").
+        if test == "vfa" and apply and res["extra"].get("_speed"):
+            w, changed = wallmod.apply(p.get("walls"), {"outer_wall_speed": res["extra"]["_speed"]}, "vfa")
+            if changed:
+                db.update("profiles", pid, {"walls": w})
+                db.save_profile_version(pid, f"Walls: outer wall speed {w['values']['outer_wall_speed']} mm/s from VFA test")
+
         db.insert("calibrations", {
             "profile_id": pid, "test": test, "inputs": inp,
             "setting": res["setting"],
@@ -976,6 +1018,9 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                     sources[k] = src
                     changed.append(k)
             merged = {**existing["settings"], **settings}
+            imported_walls = wallmod.read_tag(parsed.get("notes", ""))
+            if imported_walls["values"] and not wallmod.normalise(existing.get("walls"))["values"]:
+                db.update("profiles", pid, {"walls": imported_walls})
             db.update("profiles", pid, {"filament_id": existing["filament_id"] or fid,
                                         "printer_id": existing["printer_id"] or printer_id, "updated": now})
             db.set_profile_settings(pid, merged, sources,
@@ -986,6 +1031,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                 "filament_id": fid, "printer_id": printer_id,
                 "name": profile_name, "material": mat, "inherits": parsed["inherits"],
                 "settings": settings, "sources": {k: parsed["sources"].get(k, "imported") for k in settings},
+                "walls": wallmod.read_tag(parsed.get("notes", "")),
                 "notes": [f"Imported from OrcaSlicer. Anything not in the file comes from its parent preset "
                           f"('{parsed['inherits'] or 'none'}') in Orca."],
                 "created": now, "updated": now,

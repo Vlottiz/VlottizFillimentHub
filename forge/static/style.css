@@ -176,3 +176,8 @@ input.ai-unverified, select.ai-unverified { box-shadow: 0 0 0 2px var(--warn); }
 .orca-status.stale { color: var(--warn); }
 
 [hidden] { display: none !important; }
+
+table.walls-table { width: 100%; border-collapse: collapse; }
+table.walls-table td { padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.walls-table input { padding: 4px 7px; max-width: 120px; }
+.walls-card { margin-bottom: 10px; }
