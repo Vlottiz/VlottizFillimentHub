@@ -38,6 +38,25 @@ python -m venv .venv
 4. **Export:** **Install into Orca** (then restart Orca), or **Export .json** and in Orca use **File → Import → Import Configs…**.
 5. **Calibrate:** follow the steps (temperature → flow → pressure advance → retraction → max flow). After each test, enter the result, save, and re-export to Orca so the next test uses the new values.
 
+## Importing presets (.json)
+
+Click **Import .json** on the Filaments page, or drag one or more preset files (or a .zip of them) anywhere onto the app. Each one becomes:
+- a **filament** in your log: brand, name and colour from the preset name, plus colour, cost and temperatures from its settings
+- a **profile** with all its settings, matched to your printer from the `@Snapmaker U1` part of the name
+
+Importing a preset that's already in the app updates that profile (with a history entry) instead of making a duplicate.
+
+## Adding presets to OrcaSlicer
+
+- **From the app:** open the profile and click **Install into Orca**, then restart Orca.
+- **By hand:** in Orca, **File → Import → Import Configs…** and pick the `.json` file.
+
+Then pick it in the filament dropdown in the Prepare tab; it's under the user presets. If it isn't listed, make sure the Snapmaker U1 is the selected printer.
+
+## Your own group in Orca (VlottizFF)
+
+Exported presets are grouped under **VlottizFF** by default: the preset name starts with it (`VlottizFF Giantarm PLA Silk Silver @Snapmaker U1`), so they sort together in Orca's filament list, and it's used as the vendor, which Orca uses to group presets when you add or manage filaments. The real brand stays in the app and in the name. Change or turn this off under **Orca & backup → Your group in Orca**.
+
 ## How exported presets work in Orca
 
 Exported presets inherit from Orca's matching generic preset (e.g. `Generic PETG @System`), so Orca fills in anything this app doesn't manage, such as filament G-code. Every setting the app does manage is written into the file, so your tuned values don't depend on the parent preset. You can change or clear the parent on the profile page.

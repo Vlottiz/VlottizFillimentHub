@@ -189,3 +189,78 @@ def install(preset: dict, target_dir: Path) -> Path:
     path.write_text(json.dumps(preset, indent=4), encoding="utf-8")
     (target_dir / f"{base}.info").write_text(info_file(), encoding="utf-8")
     return path
+
+
+# ------------------------------------------------- your own group in Orca
+DEFAULT_GROUP = {"name": "VlottizFF", "as_vendor": True, "prefix_names": True}
+
+
+def group_name(name: str, group: dict | None) -> str:
+    """Preset name as exported, e.g. 'VlottizFF Giantarm PLA Silk @Snapmaker U1'."""
+    g = (group or {}).get("name", "").strip()
+    if not g or not (group or {}).get("prefix_names"):
+        return name
+    return name if name.lower().startswith(g.lower() + " ") else f"{g} {name}"
+
+
+def strip_group(name: str, group: dict | None) -> str:
+    g = (group or {}).get("name", "").strip()
+    if g and name.lower().startswith(g.lower() + " "):
+        return name[len(g) + 1:].strip()
+    return name
+
+
+def split_printer(name: str) -> tuple[str, str | None]:
+    """'Giantarm PLA @Snapmaker U1' -> ('Giantarm PLA', 'Snapmaker U1')."""
+    if " @" in name:
+        base, printer = name.rsplit(" @", 1)
+        return base.strip(), printer.strip() or None
+    return name.strip(), None
+
+
+COLOUR_WORDS = {
+    "black", "white", "grey", "gray", "silver", "gold", "red", "blue", "green", "yellow", "orange", "purple",
+    "pink", "brown", "beige", "ivory", "clear", "transparent", "natural", "navy", "teal", "cyan", "magenta",
+    "copper", "bronze", "rainbow", "galaxy", "dark", "light", "sky", "olive", "mint", "violet", "rose",
+    "matte", "translucent", "glow", "marble", "wood", "jade", "lavender", "turquoise", "charcoal", "cream",
+}
+
+
+def filament_from_preset(name: str, settings: dict, group: dict | None = None) -> dict:
+    """Work out a filament log entry (brand, name, colour, specs) from a preset."""
+    base, printer = split_printer(strip_group(name, group))
+    vendor = settings.get("filament_vendor")
+    gname = (group or {}).get("name", "")
+    if not isinstance(vendor, str) or vendor.lower() in ("generic", gname.lower(), ""):
+        vendor = None
+    words = base.split()
+    if not vendor and len(words) > 1:
+        vendor = words[0]  # usually "Brand Material ..."
+    if vendor and base.lower().startswith(vendor.lower() + " "):
+        base = base[len(vendor) + 1:]
+    colour_words = []
+    words = base.split()
+    while len(words) > 1 and words[-1].lower() in COLOUR_WORDS:
+        colour_words.insert(0, words.pop())
+    base = " ".join(words)
+    spec = {}
+    for src, dst in (("nozzle_temperature_range_low", "nozzle_min"), ("nozzle_temperature_range_high", "nozzle_max"),
+                     ("filament_density", "density"), ("filament_max_volumetric_speed", "max_volumetric_speed")):
+        if isinstance(settings.get(src), (int, float)):
+            spec[dst] = settings[src]
+    bed = settings.get("textured_plate_temp") or settings.get("hot_plate_temp")
+    if isinstance(bed, (int, float)) and bed > 0:
+        spec["bed_min"] = spec["bed_max"] = bed
+    colour = settings.get("default_filament_colour")
+    cost = settings.get("filament_cost")
+    return {
+        "brand": vendor,
+        "name": base.strip() or name,
+        "colour_name": " ".join(colour_words) or None,
+        "colour_hex": colour if isinstance(colour, str) and colour.startswith("#") else None,
+        "diameter": settings.get("filament_diameter") or 1.75,
+        "price": cost if isinstance(cost, (int, float)) and cost > 0 else None,
+        "weight_g": 1000 if isinstance(cost, (int, float)) and cost > 0 else None,
+        "spec": spec,
+        "printer_hint": printer,
+    }

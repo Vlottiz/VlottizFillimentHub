@@ -18,6 +18,7 @@ from . import materials
 SOURCE_CONFIDENCE = {
     "calibrated": 95,
     "manual": 80,
+    "imported": 75,
     "printer": 75,
     "manufacturer": 70,
     "baseline": 40,
@@ -27,6 +28,7 @@ SOURCE_CONFIDENCE = {
 SOURCE_TOLERANCE = {
     "calibrated": 0.02,
     "manual": 0.05,
+    "imported": 0.06,
     "printer": 0.08,
     "manufacturer": 0.08,
     "baseline": 0.15,
