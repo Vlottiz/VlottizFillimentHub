@@ -96,9 +96,12 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         return f
 
     def compat_for(profile: dict) -> list[str] | None:
+        # Always name the exact Orca printer preset. Without this, Orca guesses
+        # the printer from the text after "@" in the preset name ("Snapmaker U1"),
+        # which doesn't match "Snapmaker U1 (0.4 nozzle)", and hides the preset.
         pr = printer_dict(profile.get("printer_id"))
         name = (pr or {}).get("orca_printer")
-        return [name] if name and (pr or {}).get("restrict_to_printer") else None
+        return [name] if name else None
 
     def orca_group() -> dict:
         return {**orca.DEFAULT_GROUP, **(db.get_setting("orca_group") or {})}
@@ -127,7 +130,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             "tests": calibration.tests_for_ui(),
             "orca_config_dir": str(root) if root else None,
             "orca_config_exists": bool(root and root.is_dir()),
-            "orca_filament_dirs": [str(d) for d in orca.user_filament_dirs()],
+            "orca_filament_dirs": [str(d) for d in orca.install_dirs()],
+            "orca_active_dir": str(orca.active_user_dir() or ""),
             "source_confidence": tuning.SOURCE_CONFIDENCE,
         }
 
@@ -395,7 +399,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
 
     @app.post("/api/profiles/{pid}/install")
     def install_profile(pid: int, body: InstallIn):
-        allowed = {str(d) for d in orca.user_filament_dirs()}
+        allowed = {str(d) for d in orca.install_dirs()}
         if body.target_dir not in allowed:
             raise HTTPException(400, "That folder isn't an OrcaSlicer user filament folder.")
         p = get_profile(pid)
