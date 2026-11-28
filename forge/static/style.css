@@ -181,3 +181,20 @@ table.walls-table { width: 100%; border-collapse: collapse; }
 table.walls-table td { padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 table.walls-table input { padding: 4px 7px; max-width: 120px; }
 .walls-card { margin-bottom: 10px; }
+
+.sc-step { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 8px 0; opacity: .6; }
+.sc-step.active { opacity: 1; border-color: var(--accent); }
+.sc-step.done { opacity: 1; }
+.sc-head { display: flex; gap: 10px; align-items: center; }
+.sc-head .num { width: 24px; height: 24px; border-radius: 50%; background: var(--panel-2); display: grid; place-items: center; font-weight: 700; font-size: 13px; }
+.sc-step.active .num { background: var(--accent); color: #fff; }
+.sc-step.done .num { background: var(--good); color: #fff; }
+.sc-body { margin: 6px 0 0 34px; }
+.sc-body p { margin: 4px 0; }
+.sc-printer { margin: 6px 0; }
+.toolheads { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.toolhead { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 96px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel); text-align: left; }
+button.toolhead:hover { border-color: var(--accent); }
+.toolhead .swatch { width: 14px; height: 14px; }
+.tag.loaded { background: var(--good); color: #fff; margin-left: 6px; }
