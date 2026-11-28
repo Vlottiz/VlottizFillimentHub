@@ -514,11 +514,15 @@ function installDialog(p) {
     return;
   }
   openDialog(`<h2>Install into Orca</h2>
-    <p>Writes <b>${esc(p.name)}</b> into Orca's user filament folder. If a preset with this name already exists it is replaced
+    <p>Writes <b>${esc(p.orca_name || p.name)}</b> into Orca's user filament folder. If a preset with this name already exists it is replaced
     (the old one is in your Orca snapshot if you took one).</p>
     <label>Orca account folder</label>
-    <select name="dir">${dirs.map((d) => `<option>${esc(d)}</option>`).join("")}</select>
-    <p class="small muted">"default" is used when you're not logged in to Orca. Close Orca first, or restart it afterwards.</p>
+    <select name="dir">${dirs.map((d) => `<option value="${esc(d)}" ${d === state.meta.orca_active_dir ? "selected" : ""}>${esc(d)}${
+      d === state.meta.orca_active_dir ? "  (the one Orca is using now)" : ""}</option>`).join("")}</select>
+    <p class="small muted">Orca uses "default" when you're not logged in, and your account's folder when you are. The app picks the one
+    Orca is using. <b>Close Orca first</b>, or restart it afterwards: it only reads this folder when it starts.</p>
+    ${p.printer?.orca_printer ? `<p class="small muted">It will show up when <b>${esc(p.printer.orca_printer)}</b> is the selected printer.</p>`
+      : `<p class="small" style="color:var(--warn)">This profile has no printer, so Orca may not know which printer it's for. Pick one on the profile page.</p>`}
     <div class="actions"><button class="primary" value="go">Install</button><button value="cancel" formnovalidate>Cancel</button></div>`,
   async (fd) => {
     const r = await api(`/api/profiles/${p.id}/install`, { json: { target_dir: fd.get("dir") } });
@@ -702,7 +706,7 @@ async function renderPrinters() {
       <div class="title">${esc(p.name)}</div>
       <dl class="kv" style="margin-top:8px">${PRINTER_FIELDS.map(([k, l]) =>
         `<dt>${esc(l)}</dt><dd>${p.data[k] != null && p.data[k] !== "" ? esc(p.data[k]) : `<span class="muted">not set</span>`}</dd>`).join("")}
-        <dt>Only show in Orca for this printer</dt><dd>${p.data.restrict_to_printer ? "yes" : "no"}</dd></dl>
+        </dl>
       ${p.data.notes ? `<p class="small muted">${esc(p.data.notes)}</p>` : ""}
       <div class="actions">
         <button class="primary" data-act="cfg" data-id="${p.id}">Import printer.cfg</button>
@@ -728,8 +732,8 @@ function printerForm(p) {
     <div><label>Name</label><input name="name" required value="${esc(p.name)}"></div>
     <div class="row" style="margin-top:10px">${PRINTER_FIELDS.map(([k, l, t]) => `<div><label>${esc(l)}</label>
       <input name="${k}" type="${t}" step="any" value="${esc(p.data[k] ?? "")}"></div>`).join("")}</div>
-    <label style="display:flex;gap:8px;align-items:center;color:var(--text)"><input type="checkbox" name="restrict_to_printer"
-      ${p.data.restrict_to_printer ? "checked" : ""}> Exported presets only show up in Orca for this printer preset</label>
+    <p class="small muted">"Orca printer preset name" must match the printer's name in Orca exactly (e.g. Snapmaker U1 (0.4 nozzle));
+      exported filaments are made for that printer.</p>
     <div style="margin-top:10px"><label>Notes</label><textarea name="notes" rows="2">${esc(p.data.notes ?? "")}</textarea></div>
     <div class="actions"><button class="primary" value="save">Save</button><button value="cancel" formnovalidate>Cancel</button></div>`,
   async (fd) => {
@@ -738,7 +742,6 @@ function printerForm(p) {
       const v = fd.get(k);
       data[k] = v === "" ? null : t === "number" ? Number(v) : v;
     }
-    data.restrict_to_printer = fd.get("restrict_to_printer") === "on";
     data.notes = fd.get("notes");
     await api(p.id ? `/api/printers/${p.id}` : "/api/printers", { method: p.id ? "PUT" : "POST",
       json: { name: fd.get("name"), data } });

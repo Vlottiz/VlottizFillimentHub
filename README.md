@@ -61,7 +61,13 @@ Exported presets are grouped under **VlottizFF** by default: the preset name sta
 
 Exported presets inherit from Orca's matching generic preset (e.g. `Generic PETG @System`), so Orca fills in anything this app doesn't manage, such as filament G-code. Every setting the app does manage is written into the file, so your tuned values don't depend on the parent preset. You can change or clear the parent on the profile page.
 
-By default the presets appear for every printer. To make them show only for the U1, edit the printer and tick "only show in Orca for this printer".
+Each exported preset names the exact Orca printer preset it's for (the printer's "Orca printer preset name", e.g. `Snapmaker U1 (0.4 nozzle)`), so it shows up when that printer is selected. That name must match the printer's name in Orca exactly.
+
+### Preset not showing in Orca?
+- **Restart Orca.** It only reads user presets when it starts.
+- **Logged in to Orca?** Orca reads presets from your account's folder, not `default`. The install dialog picks the folder Orca is using; check it.
+- **Select the right printer** on the Prepare tab: the one named in the preset.
+- **Re-export or re-install** presets made with an older version of this app: those were missing the `version` field Orca needs, and named only "@Snapmaker U1".
 
 Orca's folders:
 
