@@ -186,11 +186,25 @@ TESTS = {
         "measure": [
             "Look at the walls under a side light for fine vertical ripples. Note the band with the smoothest walls "
             "and any bands that are clearly worse (those speeds hit a resonance).",
+            "To read a band's speed in Orca: in the sliced preview, switch the legend dropdown (top right, e.g. "
+            "'Actual Flow') to 'Speed' and check that band's colour. If you read it in the 'Flow' view instead, "
+            "you get mm³/s; choose that option below and it's converted for you.",
         ],
-        "enter": "The speed of the smoothest band (read from the label, or work it out from start + band × step).",
-        "example": "Smoothest band is the 120 mm/s one → enter 120. Logged only; it doesn't change the filament profile.",
+        "enter": "Either the speed of the smoothest band in mm/s, or its flow in mm³/s with the layer height and line "
+                 "width the test used (Orca's defaults for a 0.4 nozzle: 0.2 mm and 0.42 mm).",
+        "example": "Speed view shows 110 mm/s → choose mm/s, enter 110. Flow view shows 9 mm³/s → choose mm³/s, "
+                   "enter 9 → 9 ÷ (0.2 × 0.42) ≈ 107 mm/s. Logged only; it doesn't change the filament profile.",
         "measure_height": False,
-        "inputs": [{"key": "best_speed", "label": "Speed of the smoothest band (mm/s)", "placeholder": "e.g. 120"}],
+        "inputs": [
+            {"key": "unit", "label": "What did you read?", "type": "choice",
+             "options": [["speed", "Speed (mm/s)"], ["flow", "Flow (mm³/s)"]], "default": "speed"},
+            {"key": "best_speed", "label": "Speed of the smoothest band (mm/s)", "placeholder": "e.g. 110",
+             "show_if": ["unit", "speed"]},
+            {"key": "flow", "label": "Flow of the smoothest band (mm³/s)", "placeholder": "e.g. 9",
+             "show_if": ["unit", "flow"]},
+            {"key": "layer_height", "label": "Layer height of the test (mm)", "default": 0.2, "show_if": ["unit", "flow"]},
+            {"key": "line_width", "label": "Line width of the test (mm)", "default": 0.42, "show_if": ["unit", "flow"]},
+        ],
     },
 }
 
@@ -283,7 +297,20 @@ def compute(test: str, inputs: dict, current: dict) -> dict:
         why = f"{start:g} + {height:g} mm × {step:g} = {raw:.1f} mm³/s, minus {margin:g}% = {new}"
     elif test == "vfa":
         new = None
-        why = f"Cleanest walls at {num('best_speed'):g} mm/s (logged only)."
+        if inputs.get("unit") == "flow":
+            flow, lh, lw = num("flow"), num("layer_height", 0.2), num("line_width", 0.42)
+            if lh <= 0 or lw <= 0:
+                raise ValueError("Layer height and line width must be more than 0.")
+            if not 0 < flow <= 100:
+                raise ValueError("That flow looks wrong; it's usually between 1 and 40 mm³/s.")
+            speed = flow / (lh * lw)
+            why = (f"{flow:g} mm³/s ÷ ({lh:g} mm × {lw:g} mm) = {speed:.0f} mm/s. "
+                   f"Cleanest walls at about {speed:.0f} mm/s (logged only).")
+        else:
+            speed = num("best_speed")
+            if not 0 < speed <= 2000:
+                raise ValueError("That speed looks wrong; enter it in mm/s.")
+            why = f"Cleanest walls at {speed:g} mm/s (logged only)."
     else:  # pragma: no cover
         raise ValueError(test)
 

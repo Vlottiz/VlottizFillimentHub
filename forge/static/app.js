@@ -676,7 +676,8 @@ const renderCalTest = guard(async () => {
     fd.append("apply", form.elements.unsure.checked ? "false" : "true");
     for (const f of form.elements.photos.files) fd.append("photos", f);
     await api(`/api/profiles/${p.id}/calibrations`, { method: "POST", body: fd });
-    toast(form.elements.unsure.checked ? "Logged (profile unchanged)" : "Saved and applied. Export to Orca before the next test.");
+    toast(form.elements.unsure.checked || !t.setting ? "Logged (profile unchanged)"
+      : "Saved and applied. Export to Orca before the next test.");
     const next = tests.find((x) => x.order > t.order && !x.alt);
     state.calTest = next ? next.id : t.id;
     renderCalTest();
