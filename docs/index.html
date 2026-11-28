@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Filament Swatch</title>
+<style>
+  :root { --bg: #f6f7f9; --panel: #fff; --line: #dde1e7; --text: #1b1f24; --muted: #667085; --accent: #e8590c; --good: #2f9e44; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111317; --panel: #1a1d23; --line: #2e333d; --text: #e6e8eb; --muted: #98a2b3; --accent: #ff7a2e; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 20px 16px 40px; }
+  .brand { color: var(--accent); font-weight: 700; font-size: 14px; margin-bottom: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  h1 { font-size: 21px; margin: 0 0 4px; display: flex; gap: 10px; align-items: center; }
+  .swatch { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); flex: none; }
+  .muted { color: var(--muted); font-size: 14px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 16px 0; }
+  dt { color: var(--muted); } dd { margin: 0; font-weight: 600; }
+  .cal { color: var(--good); font-size: 12px; font-weight: 600; margin-left: 6px; }
+  button { width: 100%; font: inherit; font-weight: 600; padding: 13px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--text); margin-top: 10px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .how { margin-top: 18px; font-size: 14px; color: var(--muted); }
+  .error { color: #e03131; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">Filament Forge swatch</div>
+  <div class="card" id="card"><p class="muted">Loading…</p></div>
+  <div class="how" id="how" hidden>
+    <b>Add it to OrcaSlicer:</b> File → Import → Import Configs…, then pick the file.
+    The bundle shows up under <b>Bundle presets</b>; the .json as a user preset.
+  </div>
+</main>
+<script src="ff.js"></script>
+<script>
+(function () {
+  const card = document.getElementById("card");
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  let d;
+  try {
+    if (!location.hash || location.hash.length < 3) throw new Error("Scan a Filament Forge QR swatch to see its filament here.");
+    d = FF.decode(location.hash);
+  } catch (e) {
+    card.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+    return;
+  }
+  const s = d.settings, src = (k) => d.sources[FF.FIELDS.indexOf(k)];
+  const tag = (k) => src(k) === "c" ? '<span class="cal">calibrated</span>' : src(k) === "t" ? '<span class="cal">proven</span>' : "";
+  const row = (label, k, unit) => s[k] !== undefined ? `<dt>${label}</dt><dd>${esc(s[k])}${unit} ${tag(k)}</dd>` : "";
+  const preset = FF.buildPreset(d, false);
+  document.title = preset.name;
+  card.innerHTML = `
+    <h1><span class="swatch" style="background:${esc(s.default_filament_colour || "#ccc")}"></span>${esc(d.name)}</h1>
+    <div class="muted">${esc(s.filament_type || "")}${d.printer ? " · for " + esc(d.printer) : ""}</div>
+    <dl>
+      ${row("Nozzle", "nozzle_temperature", " °C")}
+      ${row("Bed (textured)", "textured_plate_temp", " °C")}
+      ${row("Flow ratio", "filament_flow_ratio", "")}
+      ${row("Pressure advance", "pressure_advance", "")}
+      ${row("Max flow", "filament_max_volumetric_speed", " mm³/s")}
+      ${row("Retraction", "filament_retraction_length", " mm")}
+      ${row("Fan", "fan_max_speed", " %")}
+    </dl>
+    <button class="primary" id="share" hidden>Save or send…</button>
+    <button id="json">Download .json</button>
+    <button id="bundle">Download ${esc((d.group || "").trim() || "Filament Forge")} bundle (.orca_filament)</button>`;
+  document.getElementById("how").hidden = false;
+
+  const jsonFile = () => new File([JSON.stringify(preset, null, 4)], FF.safeFilename(preset.name) + ".json", { type: "application/json" });
+  const bundleFile = () => { const b = FF.bundleFiles(d); return new File([FF.zip(b.files)], FF.safeFilename(b.group) + ".orca_filament", { type: "application/zip" }); };
+  const download = (file) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(file); a.download = file.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  };
+  document.getElementById("json").onclick = () => download(jsonFile());
+  document.getElementById("bundle").onclick = () => download(bundleFile());
+  const share = document.getElementById("share");
+  if (navigator.canShare && navigator.canShare({ files: [jsonFile()] })) {
+    share.hidden = false;
+    share.onclick = () => navigator.share({ files: [jsonFile()], title: preset.name }).catch(() => {});
+  }
+})();
+</script>
+</body>
+</html>

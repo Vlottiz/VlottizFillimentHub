@@ -6,7 +6,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtDate = (t) => t ? new Date(t * 1000).toLocaleString() : "";
-const SRC_LABEL = { calibrated: "Calibrated", manual: "You set", imported: "Imported", printer: "Printer limit",
+const SRC_LABEL = { calibrated: "Calibrated", tested: "Proven in a print", manual: "You set", imported: "Imported", printer: "Printer limit",
   manufacturer: "Manufacturer", baseline: "Material default" };
 
 const state = { meta: null, printers: [], filaments: [], profiles: [], current: null,
@@ -339,6 +339,81 @@ $("#profile-list").onclick = (ev) => {
 
 function gaugeColour(v) { return v >= 80 ? "var(--good)" : v >= 60 ? "var(--warn)" : "var(--bad)"; }
 
+function todoPanel(p) {
+  const todo = p.confidence.todo || [];
+  if (!todo.length) {
+    return `<div class="notes" style="border-left:3px solid var(--good)"><b>100% — every key setting is calibrated or proven in a print.</b></div>`;
+  }
+  const label = (k) => state.meta.fields.find((f) => f.key === k)?.label || k;
+  const testTitle = (id) => state.meta.tests.find((t) => t.id === id)?.title || id;
+  const confirmable = todo.filter((t) => !t.test).map((t) => t.key);
+  return `<div class="notes todo">
+    <b>To reach 100%</b> <span class="muted small">(biggest gains first)</span>
+    <ul>${todo.map((t) => `<li>
+      <span class="gain">+${t.gain}%</span> <b>${esc(label(t.key))}</b>
+      <span class="src ${esc(t.source)}">${esc(SRC_LABEL[t.source] || t.source)}</span>
+      ${t.test
+        ? `<button class="link" data-run-test="${esc(t.test)}">Run ${esc(testTitle(t.test))}</button>
+           <span class="muted small">or</span> <button class="link" data-confirm="${esc(t.key)}">it's proven in a print</button>`
+        : `<button class="link" data-confirm="${esc(t.key)}">✓ It worked in a print</button>
+           ${t.tip ? `<div class="small muted">${esc(t.tip)}</div>` : ""}`}
+    </li>`).join("")}</ul>
+    ${confirmable.length > 1 ? `<button data-confirm="${esc(confirmable.join(","))}">✓ All of these worked in a real print</button>` : ""}
+  </div>`;
+}
+
+async function qrDialog(p) {
+  const qs = await api("/api/settings/qr");
+  let size = 60, style = "two_colour", thickness = 5;
+  const form = openDialog(`<h2>Print a QR swatch</h2>
+    <p class="small muted">A plate with a QR code on top. Scanning it with a phone opens this profile and lets you save the
+      <b>.json</b> or <b>VlottizFF bundle</b>, or send it to someone. The profile is stored in the code itself, so it works anywhere.</p>
+    <div class="qr-wrap"><div id="qr-img" class="qr-img"></div>
+      <div style="flex:1;min-width:220px">
+        <div class="row two">
+          <div><label>Style</label><select name="style">
+            <option value="two_colour">Two-colour (best scanning)</option>
+            <option value="hollow">Hollowed out (one colour)</option></select></div>
+          <div><label>Size (mm)</label><input name="size" type="number" min="40" max="120" step="5" value="60"></div>
+          <div><label>Thickness (mm)</label><input name="thickness" type="number" min="2" max="10" step="0.5" value="5"></div>
+        </div>
+        <p class="small" id="qr-info"></p>
+        <p class="small muted" id="qr-style-tip"></p>
+      </div>
+    </div>
+    <div class="actions"><a class="btn primary" id="qr-dl" href="#">Download .3mf</a>
+      <a class="btn" id="qr-open" href="#" target="_blank" rel="noopener">Open the scan page</a>
+      <button value="cancel" formnovalidate>Close</button></div>
+    <details style="margin-top:14px"><summary class="small">Where the QR code points</summary>
+      <p class="small muted">The scan page lives in your GitHub repo's <code>docs</code> folder. Turn it on once: GitHub → your repo →
+        Settings → Pages → Source: <b>Deploy from a branch</b>, Branch: <b>main</b>, folder <b>/docs</b> → Save.</p>
+      <label>Scan page address</label><input id="qr-base" value="${esc(qs.base_url)}">
+      <div class="actions"><button type="button" id="qr-base-save">Save address</button></div>
+    </details>`, () => {});
+  const tips = {
+    two_colour: "In Orca, the plate has two parts. Give “QR code (second colour)” a dark filament in another toolhead (it's the top 0.6 mm).",
+    hollow: "One colour: the dark squares are cut almost all the way through, so their shadows make the code. Scan in even light; a lighter filament works best.",
+  };
+  const refresh = guard(async () => {
+    size = Number(form.elements.size.value) || 60;
+    style = form.elements.style.value;
+    thickness = Number(form.elements.thickness.value) || 5;
+    const q = await api(`/api/profiles/${p.id}/qr?size=${size}`);
+    $("#qr-img", form).innerHTML = q.svg;
+    $("#qr-info", form).innerHTML = `${q.modules}×${q.modules} QR, <b>${q.module_mm} mm</b> per square
+      ${q.module_mm < 0.8 ? `<span style="color:var(--warn)">: small for a 0.4 nozzle; try ${Math.ceil(0.85 * (q.modules + 4) / 5) * 5} mm</span>` : ""}`;
+    $("#qr-style-tip", form).textContent = tips[style];
+    $("#qr-dl", form).href = `/api/profiles/${p.id}/swatch.3mf?style=${style}&size=${size}&thickness=${thickness}`;
+    $("#qr-open", form).href = q.url;
+  });
+  form.oninput = (ev) => { if (ev.target.id !== "qr-base") refresh(); };
+  $("#qr-base-save", form).onclick = guard(async () => {
+    await api("/api/settings/qr", { method: "PUT", json: { base_url: $("#qr-base", form).value } });
+    toast("Saved"); refresh();
+  });
+  refresh();
+}
+
 const renderProfile = guard(async (id) => {
   await loadPrinters();
   const p = await api(`/api/profiles/${id}`);
@@ -386,11 +461,13 @@ const renderProfile = guard(async (id) => {
       <button id="pf-install">Install into Orca</button>
       <button id="pf-cal">Calibrate</button>
       <button id="pf-rebuild" title="Recalculate from material, specs and printer. Your edits and calibrations are kept.">Rebuild</button>
+      <button id="pf-qr">Print QR swatch</button>
       <button id="pf-preview">Show JSON</button>
       <button id="pf-dup">Duplicate</button>
       <button class="danger" id="pf-del">Delete</button>
     </div>
 
+    ${todoPanel(p)}
     <h2>Speed check</h2>
     <div class="speed">
       <div><span class="muted small">Fastest at ${sp.layer_height} mm layers × ${sp.line_width} mm lines</span>
@@ -451,6 +528,16 @@ const renderProfile = guard(async (id) => {
     $("#profile-detail").innerHTML = `<p class="muted">Deleted.</p>`;
     loadProfiles();
   });
+  $("#pf-qr").onclick = () => qrDialog(p);
+  $$("[data-run-test]", el).forEach((b) => (b.onclick = () => {
+    state.calProfile = p.id; state.calTest = b.dataset.runTest; show("calibrate");
+  }));
+  $$("[data-confirm]", el).forEach((b) => (b.onclick = guard(async () => {
+    const keys = b.dataset.confirm.split(",");
+    await api(`/api/profiles/${p.id}/confirm`, { json: { keys } });
+    toast("Marked as proven in a print");
+    loadProfiles();
+  })));
   $("#pf-preview").onclick = guard(async () => {
     const j = await api(`/api/profiles/${p.id}/preview`);
     openDialog(`<h2>Orca preset preview</h2><pre class="json">${esc(JSON.stringify(j, null, 2))}</pre>

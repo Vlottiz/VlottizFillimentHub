@@ -65,6 +65,21 @@ Click **Download VlottizFF bundle for Orca** on the Profiles page (or in **Orca 
 
 To update, download a new bundle and import it the same way: it has the same id, so it replaces the old one. Orca treats bundle presets as read-only; make changes in this app and re-import.
 
+## QR swatches
+
+On a profile, click **Print QR swatch** to download a `.3mf` plate (60 × 60 × 5 mm by default) with a QR code on top. Scanning it with a phone opens a page showing the filament's settings, with buttons to **save or send** the `.json` or download the **VlottizFF bundle**. The whole profile is packed into the QR link itself, so it works anywhere, even with your PC off.
+
+- **Two-colour** (best scanning): the QR code is a separate 0.6 mm part. In Orca, give "QR code (second colour)" a dark filament in another toolhead.
+- **Hollowed out** (one colour): the dark squares are cut almost all the way through, so their shadows form the code.
+
+**One-time setup:** the scan page is `docs/index.html` in this repo. Turn on GitHub Pages: repo **Settings → Pages → Deploy from a branch → main → /docs → Save**. The page address (default `https://vlottiz.github.io/VlottizFillimentHub/`) can be changed in the QR dialog.
+
+## Reaching 100%
+
+The confidence score reaches 100% when every key setting is either **calibrated** or **proven in a print**. Each profile lists what's holding it back, biggest gains first: run the calibration that sets it, or for settings no test covers (bed temperatures, fans), click **It worked in a print** once a print has come out well.
+
+Which values were calibrated is saved in the preset's **Notes** (visible in Orca's filament settings), so it survives exporting and importing again.
+
 ## Your own group in Orca (VlottizFF)
 
 Exported presets are grouped under **VlottizFF** by default: the preset name starts with it (`VlottizFF Giantarm PLA Silk Silver @Snapmaker U1`), so they sort together in Orca's filament list, and it's used as the vendor, which Orca uses to group presets when you add or manage filaments. The real brand stays in the app and in the name. Change or turn this off under **Orca & backup → Your group in Orca**.

@@ -436,3 +436,68 @@ def test_vfa_rejects_bad_values():
         calibration.compute("vfa", {"unit": "flow", "flow": "9", "layer_height": "0"}, {})
     with pytest.raises(ValueError, match="Fill in"):
         calibration.compute("vfa", {"unit": "flow"}, {})
+
+
+def _calibrate_everything(client, pid):
+    for test, inputs in [("temperature", {"best_temp": "215"}), ("flow_yolo", {"modifier": "-0.02"}),
+                         ("pressure_advance", {"pa": "0.035"}), ("retraction", {"height": "7"}),
+                         ("max_flow", {"height": "20"})]:
+        r = client.post(f"/api/profiles/{pid}/calibrations", data={"test": test, "inputs": json.dumps(inputs)})
+        assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_reaching_100_percent(client):
+    f = client.post("/api/filaments", json={"name": "PLA", "material": "PLA"}).json()
+    pid = client.post("/api/profiles", json={"filament_id": f["id"], "printer_id": 1}).json()["id"]
+    p = _calibrate_everything(client, pid)
+    conf = p["confidence"]
+    assert conf["overall"] < 100
+    # only the settings no test covers are left, each says how to fix it
+    assert {t["key"] for t in conf["todo"]} == {"hot_plate_temp", "textured_plate_temp", "fan_max_speed"}
+    assert all(t["test"] is None and t["tip"] for t in conf["todo"])
+
+    p = client.post(f"/api/profiles/{pid}/confirm", json={"keys": ["hot_plate_temp", "textured_plate_temp", "fan_max_speed"]}).json()
+    assert p["confidence"]["overall"] == 100 and p["confidence"]["todo"] == []
+    assert p["sources"]["hot_plate_temp_initial_layer"] == "tested"   # relatives confirmed too
+    assert p["sources"]["fan_min_speed"] == "tested"
+    assert p["sources"]["nozzle_temperature"] == "calibrated"          # confirm never downgrades
+    assert p["versions"][0]["reason"].startswith("Confirmed in a print")
+
+
+def test_todo_points_at_the_right_test(client):
+    f = client.post("/api/filaments", json={"name": "PLA", "material": "PLA"}).json()
+    p = client.post("/api/profiles", json={"filament_id": f["id"]}).json()
+    todo = {t["key"]: t for t in p["confidence"]["todo"]}
+    assert todo["pressure_advance"]["test"] == "pressure_advance"
+    assert todo["nozzle_temperature"]["test"] == "temperature"
+    assert list(todo)[0] in ("filament_flow_ratio", "nozzle_temperature")  # biggest gains first
+
+
+def test_calibration_survives_export_import_round_trip(client):
+    f = client.post("/api/filaments", json={"brand": "Acme", "name": "PETG", "material": "PETG"}).json()
+    pid = client.post("/api/profiles", json={"filament_id": f["id"], "printer_id": 1}).json()["id"]
+    _calibrate_everything(client, pid)
+    client.post(f"/api/profiles/{pid}/confirm", json={"keys": ["fan_max_speed"]})
+    preset = client.get(f"/api/profiles/{pid}/preview").json()
+    notes = preset["filament_notes"][0]
+    assert notes.startswith("Made with Filament Forge.") and "[ff1:" in notes and "Calibrated:" in notes
+
+    # import into an empty app (e.g. another computer): sources come back
+    client.delete(f"/api/profiles/{pid}")
+    client.delete(f"/api/filaments/{f['id']}")
+    r = client.post("/api/orca/import-file", files=[("files", ("p.json", json.dumps(preset).encode()))]).json()
+    p = client.get(f"/api/profiles/{r['results'][0]['profile_id']}").json()
+    for k in ("nozzle_temperature", "filament_flow_ratio", "pressure_advance", "filament_retraction_length",
+              "filament_max_volumetric_speed"):
+        assert p["sources"][k] == "calibrated", k
+    assert p["sources"]["fan_max_speed"] == "tested"
+    assert p["sources"]["filament_density"] == "baseline"   # where it really came from is kept too
+    assert "filament_notes" not in p["settings"]
+
+
+def test_old_files_without_tag_still_import(client):
+    raw = (FIXTURES / "Giantarm PLA Silk Silver @Snapmaker U1.json").read_bytes()
+    r = client.post("/api/orca/import-file", files=[("files", ("g.json", raw))]).json()
+    p = client.get(f"/api/profiles/{r['results'][0]['profile_id']}").json()
+    assert set(p["sources"].values()) == {"imported"}

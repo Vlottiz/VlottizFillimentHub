@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import calibration, klipper, materials, orca, tuning
+from . import calibration, klipper, materials, orca, swatch, tuning
 from .ai import extract as ai_extract
 from .ai.runtime import OllamaManager
 from .db import DB
@@ -120,6 +120,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         return orca.to_preset(
             name, settings, material=profile.get("material"),
             inherits=profile.get("inherits"), compatible_printers=compat_for(profile),
+            notes=orca.notes_for(profile["settings"], profile.get("sources") or {}),
         )
 
     # ------------------------------------------------------------------- meta
@@ -335,6 +336,24 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                 db.set_profile_settings(pid, settings, sources, "Edited: " + ", ".join(changed))
         return profile_detail(pid)
 
+    class ConfirmIn(BaseModel):
+        keys: list[str]
+
+    @app.post("/api/profiles/{pid}/confirm")
+    def confirm_settings(pid: int, body: ConfirmIn):
+        """Mark settings as proven in a real print (counts as 100% confident)."""
+        p = get_profile(pid)
+        settings, sources = p["settings"], dict(p["sources"])
+        done = []
+        for k in body.keys:
+            for key in tuning.CONFIRM_GROUPS.get(k, [k]):
+                if key in settings and sources.get(key) not in ("calibrated", "tested"):
+                    sources[key] = "tested"
+                    done.append(key)
+        if done:
+            db.set_profile_settings(pid, settings, sources, "Confirmed in a print: " + ", ".join(done))
+        return profile_detail(pid)
+
     @app.post("/api/profiles/{pid}/rebuild")
     def rebuild_profile(pid: int):
         """Recompute from material/spec/printer, keeping manual + calibrated values."""
@@ -350,7 +369,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         )
         settings, sources = built["settings"], built["sources"]
         for k, src in p["sources"].items():
-            if src in ("manual", "calibrated") and k in p["settings"]:
+            if src in ("manual", "calibrated", "tested", "imported") and k in p["settings"]:
                 settings[k] = p["settings"][k]
                 sources[k] = src
         db.update("profiles", pid, {"notes": built["notes"]})
@@ -427,6 +446,59 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                                   "content": json.dumps(preset_for(p, in_bundle=True)), "target": f"bundle {name}"})
         fname = orca.safe_filename(name) + orca.BUNDLE_EXT
         return Response(data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+    # -------------------------------------------------------------- QR swatch
+    def qr_settings() -> dict:
+        return {"base_url": swatch.DEFAULT_BASE_URL, **(db.get_setting("qr") or {})}
+
+    def qr_link(p: dict) -> str:
+        preset = preset_for(p, in_bundle=True)
+        values = {k: preset[k][0] for k in orca.QR_FIELDS_V1 if k in preset}
+        group = orca_group()
+        payload = swatch.encode(
+            p["name"], group["name"].strip() if group.get("prefix_names") else "",
+            preset.get("inherits", ""), (preset.get("compatible_printers") or [""])[0],
+            values, p.get("sources") or {})
+        return swatch.link(qr_settings()["base_url"], payload)
+
+    class QRSettingsIn(BaseModel):
+        base_url: str
+
+    @app.get("/api/settings/qr")
+    def get_qr_settings():
+        return qr_settings()
+
+    @app.put("/api/settings/qr")
+    def set_qr_settings(body: QRSettingsIn):
+        url = body.base_url.strip()
+        if not re.fullmatch(r"https?://[^\s#]+", url):
+            raise HTTPException(400, "Enter a full web address starting with https://")
+        db.set_setting("qr", {"base_url": url})
+        return qr_settings()
+
+    @app.get("/api/profiles/{pid}/qr")
+    def profile_qr(pid: int, size: float = 60):
+        url = qr_link(get_profile(pid))
+        try:
+            matrix = swatch.qr_matrix(url)
+        except ValueError:
+            raise HTTPException(400, "Too much data for a QR code")
+        n = len(matrix)
+        return {"url": url, "chars": len(url), "modules": n, "svg": swatch.qr_svg(url),
+                "module_mm": round(size / (n + 2 * swatch.QUIET), 2)}
+
+    @app.get("/api/profiles/{pid}/swatch.3mf")
+    def profile_swatch(pid: int, style: str = "two_colour", size: float = 60, thickness: float = 5):
+        if style not in ("two_colour", "hollow"):
+            raise HTTPException(400, "style must be two_colour or hollow")
+        if not (30 <= size <= 150 and 2 <= thickness <= 15):
+            raise HTTPException(400, "Size must be 30-150 mm and thickness 2-15 mm")
+        p = get_profile(pid)
+        parts, _cell = swatch.build_parts(swatch.qr_matrix(qr_link(p)), size, thickness, style)
+        data = swatch.to_3mf(parts, f"{p['name']} QR swatch")
+        fname = orca.safe_filename(f"{p['name']} QR swatch") + ".3mf"
+        return Response(data, media_type="model/3mf",
                         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
     @app.get("/api/export-all")
@@ -653,9 +725,15 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         if existing:
             pid = existing["id"]
             sources = dict(existing["sources"])
+            tagged = parsed["sources"]
             changed = [k for k, v in settings.items() if existing["settings"].get(k) != v]
             for k in changed:
-                sources[k] = "imported"
+                sources[k] = tagged.get(k, "imported")
+            for k, src in tagged.items():  # a newer calibration recorded in the file
+                if src in ("calibrated", "tested") and sources.get(k) not in ("calibrated", "tested") \
+                        and existing["settings"].get(k) == settings.get(k):
+                    sources[k] = src
+                    changed.append(k)
             merged = {**existing["settings"], **settings}
             db.update("profiles", pid, {"filament_id": existing["filament_id"] or fid,
                                         "printer_id": existing["printer_id"] or printer_id, "updated": now})
@@ -666,7 +744,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             pid = db.insert("profiles", {
                 "filament_id": fid, "printer_id": printer_id,
                 "name": profile_name, "material": mat, "inherits": parsed["inherits"],
-                "settings": settings, "sources": {k: "imported" for k in settings},
+                "settings": settings, "sources": {k: parsed["sources"].get(k, "imported") for k in settings},
                 "notes": [f"Imported from OrcaSlicer. Anything not in the file comes from its parent preset "
                           f"('{parsed['inherits'] or 'none'}') in Orca."],
                 "created": now, "updated": now,

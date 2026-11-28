@@ -16,7 +16,8 @@ from __future__ import annotations
 from . import materials
 
 SOURCE_CONFIDENCE = {
-    "calibrated": 95,
+    "calibrated": 100,
+    "tested": 100,   # you printed with it and confirmed it works
     "manual": 80,
     "imported": 75,
     "printer": 75,
@@ -27,6 +28,7 @@ SOURCE_CONFIDENCE = {
 # How far off a value from each source could reasonably be (fraction).
 SOURCE_TOLERANCE = {
     "calibrated": 0.02,
+    "tested": 0.02,
     "manual": 0.05,
     "imported": 0.06,
     "printer": 0.08,
@@ -175,6 +177,35 @@ def _nice(x: float, ref: float):
     return round(x, 3)
 
 
+# How to raise each key setting to 100%: the calibration test that sets it,
+# or None when no test exists and you confirm it after a good print.
+IMPROVE_WITH = {
+    "nozzle_temperature": "temperature",
+    "filament_flow_ratio": "flow_yolo",
+    "pressure_advance": "pressure_advance",
+    "filament_max_volumetric_speed": "max_flow",
+    "filament_retraction_length": "retraction",
+    "hot_plate_temp": None,
+    "textured_plate_temp": None,
+    "fan_max_speed": None,
+}
+
+# Confirming one setting also confirms its close relatives.
+CONFIRM_GROUPS = {
+    "nozzle_temperature": ["nozzle_temperature", "nozzle_temperature_initial_layer"],
+    "hot_plate_temp": ["hot_plate_temp", "hot_plate_temp_initial_layer"],
+    "textured_plate_temp": ["textured_plate_temp", "textured_plate_temp_initial_layer"],
+    "fan_max_speed": ["fan_max_speed", "fan_min_speed", "overhang_fan_speed"],
+    "pressure_advance": ["pressure_advance", "enable_pressure_advance"],
+}
+
+CONFIRM_TIPS = {
+    "hot_plate_temp": "Smooth plate: first layer sticks, no warped corners, part comes off when cool.",
+    "textured_plate_temp": "Textured plate: first layer sticks, no warped corners, part comes off when cool.",
+    "fan_max_speed": "Overhangs and small details look clean, and layers don't split apart.",
+}
+
+
 def confidence(settings: dict, sources: dict) -> dict:
     """Overall confidence (0-100) and a ± range for each key setting."""
     total = weight_sum = 0.0
@@ -202,4 +233,14 @@ def confidence(settings: dict, sources: dict) -> dict:
         except (TypeError, ValueError):
             per_key[key] = {"value": val, "source": src, "confidence": src_conf}
     overall = round(total / weight_sum) if weight_sum else 0
-    return {"overall": overall, "settings": per_key}
+    todo = []
+    for key, info in per_key.items():
+        if info["confidence"] >= 100:
+            continue
+        todo.append({
+            "key": key, "source": info["source"], "confidence": info["confidence"],
+            "weight": KEY_WEIGHTS[key], "test": IMPROVE_WITH.get(key), "tip": CONFIRM_TIPS.get(key),
+            "gain": round((100 - info["confidence"]) * KEY_WEIGHTS[key] / weight_sum) if weight_sum else 0,
+        })
+    todo.sort(key=lambda t: -t["gain"])
+    return {"overall": overall, "settings": per_key, "todo": todo}
