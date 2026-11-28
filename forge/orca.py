@@ -42,7 +42,7 @@ ORCA_PARENT = {
 _META_KEYS = {
     "type", "name", "inherits", "from", "setting_id", "filament_id",
     "instantiation", "version", "is_custom_defined", "renamed_from",
-    "filament_settings_id", "compatible_printers", "compatible_printers_condition",
+    "filament_settings_id", "compatible_printers", "compatible_printers_condition", "filament_notes",
     "compatible_prints", "compatible_prints_condition", "filament_extruder_variant",
 }
 
@@ -66,7 +66,8 @@ def _fmt(v) -> str:
 
 
 def to_preset(name: str, settings: dict, material: str | None = None,
-              inherits: str | None = None, compatible_printers: list[str] | None = None) -> dict:
+              inherits: str | None = None, compatible_printers: list[str] | None = None,
+              notes: str | None = None) -> dict:
     """Build an Orca user filament preset dict."""
     if inherits is None:
         inherits = ORCA_PARENT.get(material or "", "")
@@ -81,6 +82,8 @@ def to_preset(name: str, settings: dict, material: str | None = None,
     }
     if compatible_printers:
         preset["compatible_printers"] = list(compatible_printers)
+    if notes:
+        preset["filament_notes"] = [notes]
     for key in sorted(settings):
         val = settings[key]
         if val is None or val == "":
@@ -131,11 +134,15 @@ def from_preset(preset: dict) -> dict:
         if parsed is not None:
             settings[key] = parsed
     material = settings.get("filament_type")
+    notes = preset.get("filament_notes")
+    notes = notes[0] if isinstance(notes, list) and notes and isinstance(notes[0], str) else ""
     return {
         "name": preset.get("name", "Imported filament"),
         "inherits": preset.get("inherits", ""),
         "material": material if isinstance(material, str) else None,
         "settings": settings,
+        "sources": read_sources_tag(notes, settings),
+        "notes": notes,
     }
 
 
@@ -347,3 +354,50 @@ def make_bundle(presets: list[dict], name: str, author: str = "", description: s
         for fname, p in files.items():
             z.writestr(fname, json.dumps(p, indent=4))
     return buf.getvalue()
+
+
+# ---------------------------------------------- where values came from
+# Stored inside the preset's Notes (filament_notes) so calibrated values stay
+# calibrated after an export -> import round trip, and reused by the QR code.
+# Field order is frozen: printed QR swatches depend on it. Only ever append.
+QR_FIELDS_V1 = [
+    "filament_type", "filament_vendor", "default_filament_colour", "filament_diameter", "filament_density",
+    "filament_cost", "nozzle_temperature", "nozzle_temperature_initial_layer", "nozzle_temperature_range_low",
+    "nozzle_temperature_range_high", "hot_plate_temp", "hot_plate_temp_initial_layer", "textured_plate_temp",
+    "textured_plate_temp_initial_layer", "temperature_vitrification", "filament_flow_ratio",
+    "filament_max_volumetric_speed", "enable_pressure_advance", "pressure_advance", "filament_retraction_length",
+    "filament_retraction_speed", "fan_min_speed", "fan_max_speed", "overhang_fan_speed",
+    "close_fan_the_first_x_layers", "fan_cooling_layer_time", "slow_down_layer_time",
+]
+SOURCE_CODES = {"calibrated": "c", "tested": "t", "manual": "m", "imported": "i",
+                "printer": "p", "manufacturer": "f", "baseline": "b"}
+_CODE_SOURCES = {v: k for k, v in SOURCE_CODES.items()}
+_TAG = re.compile(r"\[ff1:([a-z-]+)\]")
+
+
+def sources_code(settings: dict, sources: dict) -> str:
+    return "".join(SOURCE_CODES.get(sources.get(k, ""), "-") if k in settings else "-" for k in QR_FIELDS_V1)
+
+
+def read_sources_tag(notes: str, settings: dict) -> dict:
+    """Sources from a [ff1:...] tag; anything not covered counts as imported."""
+    out = {k: "imported" for k in settings}
+    m = _TAG.search(notes or "")
+    if m:
+        for key, code in zip(QR_FIELDS_V1, m.group(1)):
+            if key in settings and code in _CODE_SOURCES:
+                out[key] = _CODE_SOURCES[code]
+    return out
+
+
+def notes_for(settings: dict, sources: dict, calibrations: list[dict] | None = None) -> str:
+    """Readable notes for Orca's Notes tab, ending with the machine-readable tag."""
+    lines = ["Made with Filament Forge."]
+    cal = [k for k in QR_FIELDS_V1 if sources.get(k) == "calibrated" and k in settings]
+    if cal:
+        lines.append("Calibrated: " + ", ".join(f"{k} {_fmt(settings[k])}" for k in cal))
+    tested = [k for k in QR_FIELDS_V1 if sources.get(k) == "tested" and k in settings]
+    if tested:
+        lines.append("Proven in a print: " + ", ".join(tested))
+    lines.append(f"[ff1:{sources_code(settings, sources)}]")
+    return "\n".join(lines)

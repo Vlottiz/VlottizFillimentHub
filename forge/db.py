@@ -58,6 +58,18 @@ CREATE TABLE IF NOT EXISTS exports (
     preset_name TEXT, content TEXT NOT NULL,
     target TEXT, created REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS troubleshoots (
+    id INTEGER PRIMARY KEY,
+    profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+    trial_profile_id INTEGER REFERENCES profiles(id) ON DELETE SET NULL,
+    description TEXT,
+    photos TEXT NOT NULL DEFAULT '[]',
+    diagnosis TEXT NOT NULL DEFAULT '{}',
+    changes TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'diagnosed',
+    created REAL NOT NULL,
+    updated REAL
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -69,7 +81,7 @@ CREATE TABLE IF NOT EXISTS orca_snapshots (
 );
 """
 
-JSON_COLS = {"data", "spec", "settings", "sources", "notes", "inputs", "photos"}
+JSON_COLS = {"data", "spec", "settings", "sources", "notes", "inputs", "photos", "diagnosis", "changes"}
 
 
 class DB:
@@ -81,6 +93,14 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns that newer versions need to databases made by older ones."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(profiles)")}
+        if "trial_of" not in cols:
+            self.conn.execute("ALTER TABLE profiles ADD COLUMN trial_of INTEGER")
+        self.conn.commit()
 
     # -- generic helpers -------------------------------------------------
     @staticmethod

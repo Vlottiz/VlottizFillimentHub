@@ -6,7 +6,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtDate = (t) => t ? new Date(t * 1000).toLocaleString() : "";
-const SRC_LABEL = { calibrated: "Calibrated", manual: "You set", imported: "Imported", printer: "Printer limit",
+const SRC_LABEL = { calibrated: "Calibrated", tested: "Proven in a print", manual: "You set", imported: "Imported", printer: "Printer limit",
   manufacturer: "Manufacturer", baseline: "Material default" };
 
 const state = { meta: null, printers: [], filaments: [], profiles: [], current: null,
@@ -325,7 +325,7 @@ async function loadProfiles() {
   el.innerHTML = state.profiles.map((p) => `
     <div class="item ${p.id === state.current ? "active" : ""}" data-id="${p.id}">
       <div class="name"><span class="swatch" style="background:${esc(p.colour_hex || "#ccc")}"></span>${esc(p.name)}</div>
-      <div class="small muted">${esc(p.material || "")} · ${esc(p.printer_name || "no printer")} · ${p.confidence}% confident</div>
+      <div class="small muted">${p.trial_of ? `<span class="tag trial">trial</span> ` : ""}${esc(p.material || "")} · ${esc(p.printer_name || "no printer")} · ${p.confidence}% confident</div>
     </div>`).join("");
   if (state.current && state.profiles.some((p) => p.id === state.current)) renderProfile(state.current);
 }
@@ -338,6 +338,199 @@ $("#profile-list").onclick = (ev) => {
 };
 
 function gaugeColour(v) { return v >= 80 ? "var(--good)" : v >= 60 ? "var(--warn)" : "var(--bad)"; }
+
+const STATUS_LABEL = { diagnosed: "suggestions only", trial: "trial being tested", fixed: "fixed ✓",
+  not_better: "trial didn't help", kept: "kept as its own profile" };
+
+function changeRows(changes) {
+  const label = (k) => state.meta.fields.find((f) => f.key === k)?.label || k;
+  return `<table class="settings changes">${changes.filter((c) => !c.companion).map((c) => `<tr>
+    <td><b>${esc(label(c.key))}</b><div class="small muted">${esc(c.why)}</div></td>
+    <td class="nowrap">${esc(c.old ?? "printer's")} → <b>${esc(c.new)}</b></td></tr>`).join("")}</table>`;
+}
+
+function problemCard(t) {
+  const issues = (t.diagnosis?.issues || []).map((i) => i.title || i.id).join(", ") || "Nothing found";
+  return `<div class="card" style="margin-bottom:8px">
+    <div class="title">${esc(issues)} <span class="muted small">${esc(fmtDate(t.created))}</span>
+      <span class="tag">${esc(STATUS_LABEL[t.status] || t.status)}</span></div>
+    ${t.description ? `<div class="small muted">“${esc(t.description)}”</div>` : ""}
+    ${t.changes?.length ? `<div class="small">${t.changes.filter((c) => !c.companion).map((c) =>
+      `${esc(c.key)}: ${esc(c.old ?? "printer's")} → <b>${esc(c.new)}</b>`).join(" · ")}</div>` : ""}
+    ${t.photos?.length ? `<div class="photos">${t.photos.map((ph) =>
+      `<a href="/photos/${encodeURIComponent(ph)}" target="_blank"><img src="/photos/${encodeURIComponent(ph)}" alt="problem photo"></a>`).join("")}</div>` : ""}
+    ${t.status === "trial" && t.trial_profile_id ? `<button class="link small" data-open-profile="${t.trial_profile_id}">Open the trial profile</button>` : ""}
+  </div>`;
+}
+
+function trialBanner(p) {
+  if (!p.trial) return "";
+  const s = p.trial.session, orig = p.trial.original;
+  return `<div class="notes trial-banner">
+    <b>Trial profile</b>: a copy of <button class="link" data-open-profile="${orig?.id}">${esc(orig?.name || "the original")}</button>
+    with these changes${s?.diagnosis?.issues?.length ? ` to fix <b>${esc(s.diagnosis.issues.map((i) => i.title || i.id).join(", "))}</b>` : ""}:
+    ${s?.changes?.length ? changeRows(s.changes) : ""}
+    <ol class="small"><li>Export or install it (or download the bundle) and print the same model again.</li>
+      <li>Compare the two prints, then:</li></ol>
+    <div class="actions">
+      <button class="primary" data-trial="better">✓ It's better: copy into the original</button>
+      <button data-trial="not_better">✗ Not better: delete the trial</button>
+      <button data-trial="keep">Keep as its own profile</button></div>
+  </div>`;
+}
+
+async function fixDialog(p) {
+  const [issues, st] = await Promise.all([api("/api/issues"), api("/api/ai/status").catch(() => null)]);
+  const aiReady = st?.state === "ready";
+  const form = openDialog(`<h2>Fix a print problem</h2>
+    <p class="small muted">Add a photo of the problem and a sentence or two about it. ${aiReady
+      ? "The AI looks at it and picks the likely problem; the app then suggests small, safe setting changes."
+      : "The AI isn't running, so pick the problem yourself (or start the AI in the AI tab)."}</p>
+    <label>Photos of the problem</label>
+    <div class="drop"><input type="file" name="photos" accept="image/*" multiple></div>
+    <div id="fix-thumbs" class="photos"></div>
+    <label style="margin-top:10px">What's wrong?</label>
+    <textarea name="description" rows="2" placeholder="e.g. Lots of thin strings between the two towers, and the top looks a bit rough."></textarea>
+    <div class="row two" style="margin-top:10px">
+      <label class="opt"><input type="radio" name="how" value="ai" ${aiReady ? "checked" : "disabled"}> Let the AI look at it</label>
+      <label class="opt"><input type="radio" name="how" value="me" ${aiReady ? "" : "checked"}> I'll pick the problem</label>
+    </div>
+    <div id="fix-pick" class="issue-pick" ${aiReady ? "hidden" : ""}>${issues.map((i) => `<label class="opt">
+      <input type="checkbox" name="issue" value="${esc(i.id)}"> <span><b>${esc(i.title)}</b>
+      <span class="small muted">${esc(i.looks_like)}</span></span></label>`).join("")}</div>
+    <label class="opt" style="margin-top:10px"><input type="checkbox" name="auto" checked>
+      Auto-tweak: make a trial profile with the changes (your original isn't touched)</label>
+    <div class="actions"><button class="primary" type="button" id="fix-go">Find the problem</button>
+      <button value="cancel" formnovalidate>Close</button></div>
+    <div id="fix-result"></div>`, () => {});
+
+  const sync = () => { $("#fix-pick", form).hidden = form.elements.how.value !== "me"; };
+  [...form.querySelectorAll("input[name=how]")].forEach((r) => (r.onchange = sync));
+  form.elements.photos.onchange = () => {
+    $("#fix-thumbs", form).innerHTML = [...form.elements.photos.files].map((f) => `<img src="${URL.createObjectURL(f)}" alt="">`).join("");
+  };
+  $("#fix-go", form).onclick = async () => {
+    const box = $("#fix-result", form), btn = $("#fix-go", form);
+    const fd = new FormData();
+    fd.append("description", form.elements.description.value);
+    for (const f of form.elements.photos.files) fd.append("photos", f);
+    const me = form.elements.how.value === "me";
+    if (me) {
+      const picked = [...form.querySelectorAll("input[name=issue]:checked")].map((c) => c.value);
+      if (!picked.length) { box.innerHTML = `<p class="small" style="color:var(--bad)">Tick at least one problem.</p>`; return; }
+      fd.append("issues", picked.join(","));
+      fd.append("use_ai", "false");
+    } else if (!form.elements.photos.files.length && !form.elements.description.value.trim()) {
+      box.innerHTML = `<p class="small" style="color:var(--bad)">Add a photo or describe the problem.</p>`; return;
+    }
+    btn.disabled = true;
+    box.innerHTML = `<p class="small muted">${me ? "Working it out…" : "The AI is looking at it… (up to a minute without a graphics card)"}</p>`;
+    try {
+      const s = await api(`/api/profiles/${p.id}/diagnose`, { method: "POST", body: fd });
+      const d = s.diagnosis;
+      let trial = null;
+      if (form.elements.auto.checked && s.changes.length) trial = await api(`/api/troubleshoots/${s.id}/trial`, { method: "POST" });
+      box.innerHTML = `<h3>What it found</h3>
+        ${d.issues.length ? `<ul class="found">${d.issues.map((i) => `<li><b>${esc(i.title)}</b>
+          ${i.confidence != null ? `<span class="tag">${Math.round(i.confidence * 100)}% sure</span>` : ""}
+          ${i.evidence && d.by === "ai" ? `<div class="small muted">${esc(i.evidence)}</div>` : ""}</li>`).join("")}</ul>`
+          : `<p>No clear problem found. ${esc(d.summary || "")} Try a closer, well-lit photo, or pick the problem yourself.</p>`}
+        ${d.summary && d.issues.length ? `<p class="small">${esc(d.summary)}</p>` : ""}
+        ${s.changes.length ? `<h3>Suggested changes</h3>${changeRows(s.changes)}` : d.issues.length
+          ? `<p class="small">No filament setting changes for this one; see the tips below.</p>` : ""}
+        ${d.issues.some((i) => i.tips?.length) ? `<h3>Tips</h3><ul class="small">${[...new Set(d.issues.flatMap((i) => i.tips || []))]
+          .map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+        <div class="actions">
+          ${trial ? `<button class="primary" type="button" id="fix-open">Open the trial profile</button>`
+            : s.changes.length ? `<button class="primary" type="button" id="fix-trial">Make a trial profile with these</button>` : ""}
+        </div>
+        ${trial ? `<p class="small muted">Made <b>${esc(trial.name)}</b>. Print with it, then tell it whether it's better.</p>` : ""}`;
+      const open = (id) => { $("#dlg").close(); state.current = id; show("profiles"); };
+      $("#fix-open", form)?.addEventListener("click", () => open(trial.id));
+      $("#fix-trial", form)?.addEventListener("click", guard(async () => {
+        const t = await api(`/api/troubleshoots/${s.id}/trial`, { method: "POST" }); open(t.id);
+      }));
+      if (!trial) renderProfile(p.id);
+    } catch (e) {
+      box.innerHTML = `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`;
+    } finally { btn.disabled = false; }
+  };
+}
+
+function todoPanel(p) {
+  const todo = p.confidence.todo || [];
+  if (!todo.length) {
+    return `<div class="notes" style="border-left:3px solid var(--good)"><b>100% — every key setting is calibrated or proven in a print.</b></div>`;
+  }
+  const label = (k) => state.meta.fields.find((f) => f.key === k)?.label || k;
+  const testTitle = (id) => state.meta.tests.find((t) => t.id === id)?.title || id;
+  const confirmable = todo.filter((t) => !t.test).map((t) => t.key);
+  return `<div class="notes todo">
+    <b>To reach 100%</b> <span class="muted small">(biggest gains first)</span>
+    <ul>${todo.map((t) => `<li>
+      <span class="gain">+${t.gain}%</span> <b>${esc(label(t.key))}</b>
+      <span class="src ${esc(t.source)}">${esc(SRC_LABEL[t.source] || t.source)}</span>
+      ${t.test
+        ? `<button class="link" data-run-test="${esc(t.test)}">Run ${esc(testTitle(t.test))}</button>
+           <span class="muted small">or</span> <button class="link" data-confirm="${esc(t.key)}">it's proven in a print</button>`
+        : `<button class="link" data-confirm="${esc(t.key)}">✓ It worked in a print</button>
+           ${t.tip ? `<div class="small muted">${esc(t.tip)}</div>` : ""}`}
+    </li>`).join("")}</ul>
+    ${confirmable.length > 1 ? `<button data-confirm="${esc(confirmable.join(","))}">✓ All of these worked in a real print</button>` : ""}
+  </div>`;
+}
+
+async function qrDialog(p) {
+  const qs = await api("/api/settings/qr");
+  let size = 60, style = "two_colour", thickness = 5;
+  const form = openDialog(`<h2>Print a QR swatch</h2>
+    <p class="small muted">A plate with a QR code on top. Scanning it with a phone opens this profile and lets you save the
+      <b>.json</b> or <b>VlottizFF bundle</b>, or send it to someone. The profile is stored in the code itself, so it works anywhere.</p>
+    <div class="qr-wrap"><div id="qr-img" class="qr-img"></div>
+      <div style="flex:1;min-width:220px">
+        <div class="row two">
+          <div><label>Style</label><select name="style">
+            <option value="two_colour">Two-colour (best scanning)</option>
+            <option value="hollow">Hollowed out (one colour)</option></select></div>
+          <div><label>Size (mm)</label><input name="size" type="number" min="40" max="120" step="5" value="60"></div>
+          <div><label>Thickness (mm)</label><input name="thickness" type="number" min="2" max="10" step="0.5" value="5"></div>
+        </div>
+        <p class="small" id="qr-info"></p>
+        <p class="small muted" id="qr-style-tip"></p>
+      </div>
+    </div>
+    <div class="actions"><a class="btn primary" id="qr-dl" href="#">Download .3mf</a>
+      <a class="btn" id="qr-open" href="#" target="_blank" rel="noopener">Open the scan page</a>
+      <button value="cancel" formnovalidate>Close</button></div>
+    <details style="margin-top:14px"><summary class="small">Where the QR code points</summary>
+      <p class="small muted">The scan page lives in your GitHub repo's <code>docs</code> folder. Turn it on once: GitHub → your repo →
+        Settings → Pages → Source: <b>Deploy from a branch</b>, Branch: <b>main</b>, folder <b>/docs</b> → Save.</p>
+      <label>Scan page address</label><input id="qr-base" value="${esc(qs.base_url)}">
+      <div class="actions"><button type="button" id="qr-base-save">Save address</button></div>
+    </details>`, () => {});
+  const tips = {
+    two_colour: "In Orca, the plate has two parts. Give “QR code (second colour)” a dark filament in another toolhead (it's the top 0.6 mm).",
+    hollow: "One colour: the dark squares are cut almost all the way through, so their shadows make the code. Scan in even light; a lighter filament works best.",
+  };
+  const refresh = guard(async () => {
+    size = Number(form.elements.size.value) || 60;
+    style = form.elements.style.value;
+    thickness = Number(form.elements.thickness.value) || 5;
+    const q = await api(`/api/profiles/${p.id}/qr?size=${size}`);
+    $("#qr-img", form).innerHTML = q.svg;
+    $("#qr-info", form).innerHTML = `${q.modules}×${q.modules} QR, <b>${q.module_mm} mm</b> per square
+      ${q.module_mm < 0.8 ? `<span style="color:var(--warn)">: small for a 0.4 nozzle; try ${Math.ceil(0.85 * (q.modules + 4) / 5) * 5} mm</span>` : ""}`;
+    $("#qr-style-tip", form).textContent = tips[style];
+    $("#qr-dl", form).href = `/api/profiles/${p.id}/swatch.3mf?style=${style}&size=${size}&thickness=${thickness}`;
+    $("#qr-open", form).href = q.url;
+  });
+  form.oninput = (ev) => { if (ev.target.id !== "qr-base") refresh(); };
+  $("#qr-base-save", form).onclick = guard(async () => {
+    await api("/api/settings/qr", { method: "PUT", json: { base_url: $("#qr-base", form).value } });
+    toast("Saved"); refresh();
+  });
+  refresh();
+}
 
 const renderProfile = guard(async (id) => {
   await loadPrinters();
@@ -386,11 +579,15 @@ const renderProfile = guard(async (id) => {
       <button id="pf-install">Install into Orca</button>
       <button id="pf-cal">Calibrate</button>
       <button id="pf-rebuild" title="Recalculate from material, specs and printer. Your edits and calibrations are kept.">Rebuild</button>
+      <button id="pf-fix">Fix a print problem</button>
+      <button id="pf-qr">Print QR swatch</button>
       <button id="pf-preview">Show JSON</button>
       <button id="pf-dup">Duplicate</button>
       <button class="danger" id="pf-del">Delete</button>
     </div>
 
+    ${trialBanner(p)}
+    ${todoPanel(p)}
     <h2>Speed check</h2>
     <div class="speed">
       <div><span class="muted small">Fastest at ${sp.layer_height} mm layers × ${sp.line_width} mm lines</span>
@@ -408,6 +605,7 @@ const renderProfile = guard(async (id) => {
     }).join("")}
     ${extra.length ? `<h3>Other settings</h3><table class="settings">${extra.map((k) => row(k, k, "", null)).join("")}</table>` : ""}
 
+    ${p.troubleshoots?.length ? `<h2>Print problems</h2>${p.troubleshoots.map(problemCard).join("")}` : ""}
     <h2>Calibration log</h2>
     ${p.calibrations.length ? p.calibrations.map(calCard).join("") : `<p class="muted">No calibrations yet.</p>`}
 
@@ -451,6 +649,29 @@ const renderProfile = guard(async (id) => {
     $("#profile-detail").innerHTML = `<p class="muted">Deleted.</p>`;
     loadProfiles();
   });
+  $("#pf-qr").onclick = () => qrDialog(p);
+  $("#pf-fix").onclick = () => fixDialog(p);
+  $$("[data-trial]", el).forEach((b) => (b.onclick = guard(async () => {
+    const result = b.dataset.trial;
+    if (result === "not_better" && !confirm("Delete this trial profile? The original stays as it was.")) return;
+    const r = await api(`/api/profiles/${p.id}/trial/result`, { json: { result } });
+    toast(result === "better" ? "Changes copied into the original and marked proven in a print"
+      : result === "keep" ? "Kept as its own profile" : "Trial deleted; the original is unchanged");
+    state.current = r.id || null;
+    loadProfiles();
+  })));
+  $$("[data-open-profile]", el).forEach((b) => (b.onclick = () => {
+    state.current = Number(b.dataset.openProfile); loadProfiles();
+  }));
+  $$("[data-run-test]", el).forEach((b) => (b.onclick = () => {
+    state.calProfile = p.id; state.calTest = b.dataset.runTest; show("calibrate");
+  }));
+  $$("[data-confirm]", el).forEach((b) => (b.onclick = guard(async () => {
+    const keys = b.dataset.confirm.split(",");
+    await api(`/api/profiles/${p.id}/confirm`, { json: { keys } });
+    toast("Marked as proven in a print");
+    loadProfiles();
+  })));
   $("#pf-preview").onclick = guard(async () => {
     const j = await api(`/api/profiles/${p.id}/preview`);
     openDialog(`<h2>Orca preset preview</h2><pre class="json">${esc(JSON.stringify(j, null, 2))}</pre>

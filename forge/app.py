@@ -17,10 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import calibration, klipper, materials, orca, tuning
+from . import calibration, klipper, materials, orca, swatch, troubleshoot, tuning
 from .ai import extract as ai_extract
 from .ai.runtime import OllamaManager
-from .db import DB
+from .db import DB, SCHEMA as SCHEMA_SQL
 from .fields import FIELDS
 
 ROOT = Path(__file__).resolve().parent
@@ -120,6 +120,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         return orca.to_preset(
             name, settings, material=profile.get("material"),
             inherits=profile.get("inherits"), compatible_printers=compat_for(profile),
+            notes=orca.notes_for(profile["settings"], profile.get("sources") or {}),
         )
 
     # ------------------------------------------------------------------- meta
@@ -298,6 +299,12 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         p["speed"] = tuning.speed_hint(p["settings"], printer)
         p["versions"] = db.all(
             "SELECT id, reason, created FROM profile_versions WHERE profile_id = ? ORDER BY id DESC", (pid,))
+        p["troubleshoots"] = [_session_view(t) for t in db.all(
+            "SELECT * FROM troubleshoots WHERE profile_id = ? OR trial_profile_id = ? ORDER BY id DESC", (pid, pid))]
+        if p.get("trial_of"):
+            orig = db.one("SELECT id, name FROM profiles WHERE id = ?", (p["trial_of"],))
+            sess = db.one("SELECT * FROM troubleshoots WHERE trial_profile_id = ? ORDER BY id DESC LIMIT 1", (pid,))
+            p["trial"] = {"original": orig, "session": _session_view(sess) if sess else None}
         p["calibrations"] = db.all(
             "SELECT * FROM calibrations WHERE profile_id = ? ORDER BY id DESC", (pid,))
         p["orca_name"] = preset_for(p)["name"]
@@ -335,6 +342,154 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                 db.set_profile_settings(pid, settings, sources, "Edited: " + ", ".join(changed))
         return profile_detail(pid)
 
+    class ConfirmIn(BaseModel):
+        keys: list[str]
+
+    @app.post("/api/profiles/{pid}/confirm")
+    def confirm_settings(pid: int, body: ConfirmIn):
+        """Mark settings as proven in a real print (counts as 100% confident)."""
+        p = get_profile(pid)
+        settings, sources = p["settings"], dict(p["sources"])
+        done = []
+        for k in body.keys:
+            for key in tuning.CONFIRM_GROUPS.get(k, [k]):
+                if key in settings and sources.get(key) not in ("calibrated", "tested"):
+                    sources[key] = "tested"
+                    done.append(key)
+        if done:
+            db.set_profile_settings(pid, settings, sources, "Confirmed in a print: " + ", ".join(done))
+        return profile_detail(pid)
+
+    # ------------------------------------------------------ issue detector
+    def _save_photos(pid: int, uploads) -> tuple[list[str], list[bytes]]:
+        names, blobs = [], []
+        for ph in uploads or []:
+            if not ph.filename:
+                continue
+            ext = Path(ph.filename).suffix.lower()
+            if ext not in PHOTO_EXT:
+                raise HTTPException(400, f"{ph.filename}: only image files can be attached")
+            data = ph.file.read(15_000_001)
+            if len(data) > 15_000_000:
+                raise HTTPException(400, f"{ph.filename} is over 15 MB")
+            PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+            name = f"{pid}-issue-{int(time.time())}-{secrets.token_hex(4)}{ext}"
+            (PHOTO_DIR / name).write_bytes(data)
+            names.append(name)
+            blobs.append(data)
+        return names, blobs[:4]
+
+    def _session_view(sess: dict) -> dict:
+        diag = sess["diagnosis"] or {}
+        for it in diag.get("issues", []):
+            info = troubleshoot.ISSUES.get(it["id"], {})
+            it["title"], it["tips"], it["looks_like"] = info.get("title"), info.get("tips", []), info.get("looks_like")
+        return sess
+
+    @app.get("/api/issues")
+    def issue_list():
+        return troubleshoot.catalogue()
+
+    @app.post("/api/profiles/{pid}/diagnose")
+    def diagnose(pid: int, description: str = Form(""), issues: str = Form(""),
+                 use_ai: bool = Form(True), photos: list[UploadFile] | None = File(None)):
+        """Find what's wrong (AI from a photo, or your own pick) and plan setting changes."""
+        p = get_profile(pid)
+        manual = [i for i in (x.strip() for x in issues.split(",")) if i in troubleshoot.ISSUES]
+        if not manual and not use_ai:
+            raise HTTPException(400, "Pick at least one problem")
+        names, blobs = _save_photos(pid, photos)
+        if manual:
+            diag = {"issues": [{"id": i, "confidence": None, "evidence": "You picked this."} for i in manual],
+                    "summary": "", "by": "you"}
+        else:
+            if not blobs and not description.strip():
+                raise HTTPException(400, "Add a photo or describe the problem")
+            if not ai.ready():
+                raise HTTPException(409, "The AI isn't running. Start it in the AI tab, or pick the problem yourself.")
+            try:
+                diag = troubleshoot.diagnose_with_ai(ai.chat, description, blobs, p.get("material"), p["settings"])
+            except Exception as e:
+                raise HTTPException(502, f"AI step failed: {e}")
+            diag["by"] = "ai"
+        ids = [i["id"] for i in diag["issues"]]
+        changes = troubleshoot.plan_changes(ids, p["settings"], printer_dict(p.get("printer_id")))
+        sid = db.insert("troubleshoots", {"profile_id": pid, "description": description.strip()[:1000],
+                                          "photos": names, "diagnosis": diag, "changes": changes,
+                                          "status": "diagnosed", "updated": time.time()})
+        return _session_view(db.one("SELECT * FROM troubleshoots WHERE id = ?", (sid,)))
+
+    @app.post("/api/troubleshoots/{sid}/trial")
+    def make_trial(sid: int):
+        """Copy the profile with the suggested changes, to print and compare."""
+        sess = db.one("SELECT * FROM troubleshoots WHERE id = ?", (sid,))
+        if not sess:
+            raise HTTPException(404, "Not found")
+        if not sess["changes"]:
+            raise HTTPException(400, "There are no setting changes to try for this problem")
+        if sess.get("trial_profile_id") and db.one("SELECT id FROM profiles WHERE id = ?", (sess["trial_profile_id"],)):
+            return profile_detail(sess["trial_profile_id"])
+        p = get_profile(sess["profile_id"])
+        settings, sources = dict(p["settings"]), dict(p["sources"])
+        for c in sess["changes"]:
+            settings[c["key"]] = c["new"]
+            sources[c["key"]] = "manual"
+        first = (sess["diagnosis"].get("issues") or [{}])[0].get("id", "fix")
+        label = troubleshoot.ISSUES.get(first, {}).get("title", "fix").split(" /")[0].lower()
+        now = time.time()
+        tid = db.insert("profiles", {
+            "filament_id": p["filament_id"], "printer_id": p["printer_id"], "trial_of": p["id"],
+            "name": f"{p['name']} (trial: {label})", "material": p["material"], "inherits": p["inherits"],
+            "settings": settings, "sources": sources,
+            "notes": [f"Trial copy of '{p['name']}' to fix: {label}. Print with it, then say if it's better."],
+            "created": now, "updated": now,
+        })
+        db.save_profile_version(tid, "Trial created: " + ", ".join(f"{c['key']} {c['old']} -> {c['new']}"
+                                                                    for c in sess["changes"]))
+        db.update("troubleshoots", sid, {"trial_profile_id": tid, "status": "trial", "updated": now})
+        return profile_detail(tid)
+
+    class TrialResult(BaseModel):
+        result: str  # better | not_better | keep
+
+    @app.post("/api/profiles/{tid}/trial/result")
+    def trial_result(tid: int, body: TrialResult):
+        """better: copy the changes into the original (proven in a print) and remove the trial.
+        not_better: remove the trial. keep: turn the trial into a normal profile."""
+        t = get_profile(tid)
+        if not t.get("trial_of"):
+            raise HTTPException(400, "That isn't a trial profile")
+        sess = db.one("SELECT * FROM troubleshoots WHERE trial_profile_id = ? ORDER BY id DESC LIMIT 1", (tid,))
+        orig = db.one("SELECT * FROM profiles WHERE id = ?", (t["trial_of"],))
+        now = time.time()
+        if body.result == "better":
+            if not orig:
+                raise HTTPException(400, "The original profile was deleted; choose 'keep' instead")
+            settings, sources = dict(orig["settings"]), dict(orig["sources"])
+            keys = [c["key"] for c in (sess or {}).get("changes", [])] or \
+                   [k for k, v in t["settings"].items() if orig["settings"].get(k) != v]
+            for k in keys:
+                if k in t["settings"]:
+                    settings[k] = t["settings"][k]
+                    sources[k] = "tested"
+            db.set_profile_settings(orig["id"], settings, sources, "Fix confirmed in a print: " + ", ".join(keys))
+            db.delete("profiles", tid)
+            if sess:
+                db.update("troubleshoots", sess["id"], {"status": "fixed", "updated": now})
+            return profile_detail(orig["id"])
+        if body.result == "not_better":
+            db.delete("profiles", tid)
+            if sess:
+                db.update("troubleshoots", sess["id"], {"status": "not_better", "updated": now})
+            return profile_detail(orig["id"]) if orig else {"ok": True}
+        if body.result == "keep":
+            db.update("profiles", tid, {"trial_of": None, "name": t["name"].replace(" (trial: ", " (").strip(),
+                                        "updated": now})
+            if sess:
+                db.update("troubleshoots", sess["id"], {"status": "kept", "updated": now})
+            return profile_detail(tid)
+        raise HTTPException(400, "result must be better, not_better or keep")
+
     @app.post("/api/profiles/{pid}/rebuild")
     def rebuild_profile(pid: int):
         """Recompute from material/spec/printer, keeping manual + calibrated values."""
@@ -350,7 +505,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         )
         settings, sources = built["settings"], built["sources"]
         for k, src in p["sources"].items():
-            if src in ("manual", "calibrated") and k in p["settings"]:
+            if src in ("manual", "calibrated", "tested", "imported") and k in p["settings"]:
                 settings[k] = p["settings"][k]
                 sources[k] = src
         db.update("profiles", pid, {"notes": built["notes"]})
@@ -427,6 +582,59 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
                                   "content": json.dumps(preset_for(p, in_bundle=True)), "target": f"bundle {name}"})
         fname = orca.safe_filename(name) + orca.BUNDLE_EXT
         return Response(data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+    # -------------------------------------------------------------- QR swatch
+    def qr_settings() -> dict:
+        return {"base_url": swatch.DEFAULT_BASE_URL, **(db.get_setting("qr") or {})}
+
+    def qr_link(p: dict) -> str:
+        preset = preset_for(p, in_bundle=True)
+        values = {k: preset[k][0] for k in orca.QR_FIELDS_V1 if k in preset}
+        group = orca_group()
+        payload = swatch.encode(
+            p["name"], group["name"].strip() if group.get("prefix_names") else "",
+            preset.get("inherits", ""), (preset.get("compatible_printers") or [""])[0],
+            values, p.get("sources") or {})
+        return swatch.link(qr_settings()["base_url"], payload)
+
+    class QRSettingsIn(BaseModel):
+        base_url: str
+
+    @app.get("/api/settings/qr")
+    def get_qr_settings():
+        return qr_settings()
+
+    @app.put("/api/settings/qr")
+    def set_qr_settings(body: QRSettingsIn):
+        url = body.base_url.strip()
+        if not re.fullmatch(r"https?://[^\s#]+", url):
+            raise HTTPException(400, "Enter a full web address starting with https://")
+        db.set_setting("qr", {"base_url": url})
+        return qr_settings()
+
+    @app.get("/api/profiles/{pid}/qr")
+    def profile_qr(pid: int, size: float = 60):
+        url = qr_link(get_profile(pid))
+        try:
+            matrix = swatch.qr_matrix(url)
+        except ValueError:
+            raise HTTPException(400, "Too much data for a QR code")
+        n = len(matrix)
+        return {"url": url, "chars": len(url), "modules": n, "svg": swatch.qr_svg(url),
+                "module_mm": round(size / (n + 2 * swatch.QUIET), 2)}
+
+    @app.get("/api/profiles/{pid}/swatch.3mf")
+    def profile_swatch(pid: int, style: str = "two_colour", size: float = 60, thickness: float = 5):
+        if style not in ("two_colour", "hollow"):
+            raise HTTPException(400, "style must be two_colour or hollow")
+        if not (30 <= size <= 150 and 2 <= thickness <= 15):
+            raise HTTPException(400, "Size must be 30-150 mm and thickness 2-15 mm")
+        p = get_profile(pid)
+        parts, _cell = swatch.build_parts(swatch.qr_matrix(qr_link(p)), size, thickness, style)
+        data = swatch.to_3mf(parts, f"{p['name']} QR swatch")
+        fname = orca.safe_filename(f"{p['name']} QR swatch") + ".3mf"
+        return Response(data, media_type="model/3mf",
                         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
     @app.get("/api/export-all")
@@ -653,9 +861,15 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         if existing:
             pid = existing["id"]
             sources = dict(existing["sources"])
+            tagged = parsed["sources"]
             changed = [k for k, v in settings.items() if existing["settings"].get(k) != v]
             for k in changed:
-                sources[k] = "imported"
+                sources[k] = tagged.get(k, "imported")
+            for k, src in tagged.items():  # a newer calibration recorded in the file
+                if src in ("calibrated", "tested") and sources.get(k) not in ("calibrated", "tested") \
+                        and existing["settings"].get(k) == settings.get(k):
+                    sources[k] = src
+                    changed.append(k)
             merged = {**existing["settings"], **settings}
             db.update("profiles", pid, {"filament_id": existing["filament_id"] or fid,
                                         "printer_id": existing["printer_id"] or printer_id, "updated": now})
@@ -666,7 +880,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
             pid = db.insert("profiles", {
                 "filament_id": fid, "printer_id": printer_id,
                 "name": profile_name, "material": mat, "inherits": parsed["inherits"],
-                "settings": settings, "sources": {k: "imported" for k in settings},
+                "settings": settings, "sources": {k: parsed["sources"].get(k, "imported") for k in settings},
                 "notes": [f"Imported from OrcaSlicer. Anything not in the file comes from its parent preset "
                           f"('{parsed['inherits'] or 'none'}') in Orca."],
                 "created": now, "updated": now,
@@ -771,6 +985,8 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         safety.write_text("\n".join(db.conn.iterdump()), encoding="utf-8")
         src.backup(db.conn)
+        db.conn.executescript(SCHEMA_SQL)
+        db._migrate()
         src.close()
         for name in z.namelist():
             if name.startswith("photos/") and Path(name).suffix.lower() in PHOTO_EXT:
