@@ -97,12 +97,14 @@ Photos are shrunk to 1024 px before the AI sees them, and the AI's context (how 
 
 ## QR swatches
 
-On a profile, click **Print QR swatch** to download a `.3mf` plate (60 × 60 × 5 mm by default) with a QR code on top. Choose what the code holds:
+On a profile, click **Print QR swatch** to download a `.3mf` plate with a QR code on top. Every square of the code is
+at least **1.5 mm**, so phones can read it off a 0.4 mm nozzle print; the plate grows to whatever size that needs
+(you can make it bigger, not smaller). Choose what the code holds:
 
-- **Quick scan** (default): just the filament's name, material and colour. The code is small (41 × 41 squares, about 1.3 mm each on a 60 mm plate), so phones read it easily off a print. Scanning it brings the filament up in *your* app; the settings stay in the app.
-- **Full settings**: the whole profile is packed into the code, so anyone can scan it and save the `.json` or the **VlottizFF bundle**, even with your PC off. The code has about 65 × 65 squares, so it needs a plate of about **90 mm** or more. At 60 mm the squares are under 1 mm and phones can't read them off a print.
-
-The dialog shows the square size: aim for **1.2 mm or more** with a 0.4 mm nozzle.
+- **Full settings** (default): the whole profile is packed into the code, so anyone can scan it and save the `.json`
+  or the **VlottizFF bundle**, even with your PC off. About 65 × 65 squares: a **107 mm** plate.
+- **Quick scan**: just the filament's name, material and colour (41 × 41 squares, a **71 mm** plate). Scanning it
+  brings the filament up in *your* app; the settings stay in the app.
 
 - **Two-colour** (best scanning): the QR code is a separate 0.6 mm part. In Orca, give "QR code (second colour)" a dark filament in another toolhead.
 - **Hollowed out** (one colour): the dark squares are cut almost all the way through, so their shadows form the code.
@@ -116,7 +118,7 @@ The filament's name is printed under the code (you can change the text in the di
 - On the scan page (phone or PC): **Add to Filament Forge on this computer** opens the app and imports it, if the app is running on that computer. On a phone, **Save or send** the .json or bundle instead.
 - Or paste the link your phone shows into **Scan swatch → Paste a swatch link**.
 
-**Scanning shows nothing?** Use Quick scan or a bigger plate (squares of 1.2 mm or more). Print the code in a *different, darker, matte* filament than the plate (same filament = invisible code); silk and other shiny filaments reflect light and are hard to read, so use a matte plate for silk. Check that GitHub Pages is turned on (below), and try scanning in good light from about 15–20 cm. Without the scan page, you can still get the profile: copy the link your phone shows, and in the app use **Filaments → Paste swatch link**.
+**Scanning shows nothing?** Reprint it: older swatches had squares under 1 mm. Print the code in a *different, darker, matte* filament than the plate (same filament = invisible code); silk and other shiny filaments reflect light and are hard to read, so use a matte plate for silk. Check that GitHub Pages is turned on (below), and try scanning in good light from about 15–20 cm. Without the scan page, you can still get the profile: copy the link your phone shows, and in the app use **Filaments → Paste swatch link**.
 
 **One-time setup:** the scan page is `docs/index.html` in this repo. Turn on GitHub Pages: repo **Settings → Pages → Deploy from a branch → main → /docs → Save**. (If it's set to `/ (root)` instead, a small redirect page sends swatch links on to `docs/`, so either works.) The page address (default `https://vlottiz.github.io/VlottizFillimentHub/`) can be changed in the QR dialog.
 

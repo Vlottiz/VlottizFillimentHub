@@ -101,23 +101,28 @@ def _mesh_ok(mesh):
 @pytest.mark.parametrize("style", ["two_colour", "hollow"])
 def test_swatch_model_is_solid_and_sized(style):
     m = swatch.qr_matrix("https://example.com/#" + "x" * 150)
+    S = swatch.plate_size(len(m), 60)  # grown so squares are at least 1.5 mm
+    assert S > 60 and S / (len(m) + 2 * swatch.QUIET) >= swatch.MIN_MODULE_MM
     parts, cell = swatch.build_parts(m, 60, 5, style)
+    assert cell >= swatch.MIN_MODULE_MM
     total_vol = 0
     for name, mesh in parts:
         closed, vol = _mesh_ok(mesh)
         assert closed, name
         assert vol > 0, name  # faces point outwards
         xs = [v[0] for v in mesh.verts]; zs = [v[2] for v in mesh.verts]
-        assert max(xs) <= 60.0001 and min(zs) >= 0 and max(zs) <= 5.0001
+        assert max(xs) <= S + 1e-4 and min(zs) >= 0 and max(zs) <= 5.0001
         total_vol += vol
     dark = sum(map(sum, m)) * cell * cell
     if style == "two_colour":
         assert [n for n, _ in parts] == ["Swatch", "QR code (second colour)"]
         # body + inlay fill the full plate exactly
-        assert total_vol == pytest.approx(60 * 60 * 5, rel=1e-6)
+        assert total_vol == pytest.approx(S * S * 5, rel=1e-6)
         assert _mesh_ok(parts[1][1])[1] == pytest.approx(dark * swatch.INLAY_DEPTH, rel=1e-6)
     else:
-        assert total_vol == pytest.approx(60 * 60 * 5 - dark * (5 - swatch.HOLLOW_FLOOR), rel=1e-6)
+        assert total_vol == pytest.approx(S * S * 5 - dark * (5 - swatch.HOLLOW_FLOOR), rel=1e-6)
+    # a plate bigger than the minimum is kept as asked
+    assert swatch.plate_size(len(m), 150) == 150
 
 
 def test_swatch_3mf_download(client):
@@ -159,20 +164,21 @@ def test_fields_lists_match():
 @pytest.mark.parametrize("style", ["two_colour", "hollow"])
 def test_swatch_with_name_label(style):
     m = swatch.qr_matrix("https://example.com/#" + "x" * 150)
+    S = swatch.plate_size(len(m), 60)
     parts, cell = swatch.build_parts(m, 60, 5, style, "Giantarm PLA Silk Silver")
-    label_h = len(swatch.label_mask("Giantarm PLA Silk Silver", 60)) * swatch.LABEL_PX
+    label_h = len(swatch.label_mask("Giantarm PLA Silk Silver", S)) * swatch.LABEL_PX
     assert 5 < label_h < 20
     total = 0
     for name, mesh in parts:
         closed, vol = _mesh_ok(mesh)
         assert closed and vol > 0, name
         ys = [v[1] for v in mesh.verts]
-        assert min(ys) >= -1e-6 and max(ys) <= 60 + label_h + 1e-6
+        assert min(ys) >= -1e-6 and max(ys) <= S + label_h + 1e-6
         total += vol
     if style == "two_colour":
-        assert total == pytest.approx(60 * (60 + label_h) * 5, rel=1e-6)   # parts fill the plate exactly
+        assert total == pytest.approx(S * (S + label_h) * 5, rel=1e-6)   # parts fill the plate exactly
     else:
-        assert total < 60 * (60 + label_h) * 5
+        assert total < S * (S + label_h) * 5
 
 
 def test_label_fits_and_long_names_are_shortened():
@@ -324,12 +330,15 @@ def test_swatch_check_new_filament(client):
 
 def test_quick_scan_code_is_small_and_finds_the_profile(client, tmp_path):
     pid = _calibrated_profile(client)
-    short = client.get(f"/api/profiles/{pid}/qr").json()  # quick scan is the default
-    full = client.get(f"/api/profiles/{pid}/qr?code=full").json()
+    short = client.get(f"/api/profiles/{pid}/qr?code=short").json()
+    full = client.get(f"/api/profiles/{pid}/qr").json()  # full settings is the default
+    assert full["url"].split("#", 1)[1].startswith("1*")
     assert "#s*Giantarm+PLA+Silk+Silver+@Snapmaker+U1*PLA+Silk*c9c9c9" in short["url"]
-    # few enough squares to print at 1.2 mm+ on a 60 mm plate; the full code isn't
-    assert short["modules"] <= 41 and short["module_mm"] >= 1.2
-    assert full["modules"] > 55 and full["module_mm"] < 1.0
+    # squares are never under 1.5 mm: the plate grows to fit the code
+    assert short["module_mm"] >= 1.5 and full["module_mm"] >= 1.5
+    assert short["modules"] <= 41 and short["size_mm"] <= 71
+    assert full["modules"] > 55 and full["size_mm"] >= 100 and full["min_size_mm"] == full["size_mm"]
+    assert client.get(f"/api/profiles/{pid}/qr?size=150").json()["size_mm"] == 150
     d = swatch.decode(short["url"].split("#", 1)[1])
     assert d["short"] and d["name"] == "Giantarm PLA Silk Silver @Snapmaker U1"
     assert d["settings"]["filament_type"] == "PLA Silk" and d["settings"]["default_filament_colour"].startswith("#")
@@ -340,7 +349,7 @@ def test_quick_scan_code_is_small_and_finds_the_profile(client, tmp_path):
     # importing it just opens the existing profile
     assert client.post("/api/import-swatch-link", json={"link": short["url"]}).json()["id"] == pid
     # the 3mf uses it too
-    r = client.get(f"/api/profiles/{pid}/swatch.3mf?size=60")
+    r = client.get(f"/api/profiles/{pid}/swatch.3mf?size=60&code=short")
     assert r.status_code == 200
     assert client.get(f"/api/profiles/{pid}/swatch.3mf?code=nope").status_code == 400
 

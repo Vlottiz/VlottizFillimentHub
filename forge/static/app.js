@@ -700,20 +700,20 @@ function todoPanel(p) {
 
 async function qrDialog(p) {
   const qs = await api("/api/settings/qr");
-  let size = 60, style = "two_colour", thickness = 5, code = "short";
+  let size = 0, style = "two_colour", thickness = 5, code = "full";
   const form = openDialog(`<h2>Print a QR swatch</h2>
     <p class="small muted">A plate with a QR code on top. Scan it with your phone or the app's <b>Scan swatch</b> to bring this
       filament up: is it in the app, is it in Orca, and which toolhead is it in.</p>
     <div class="qr-wrap"><div id="qr-img" class="qr-img"></div>
       <div style="flex:1;min-width:220px">
         <div><label>What the code holds</label><select name="code">
-          <option value="short">Quick scan: the name (small code, scans easily)</option>
-          <option value="full">Full settings: works on anyone's phone or app (much bigger code)</option></select></div>
+          <option value="full">Full settings: works on anyone's phone or app</option>
+          <option value="short">Quick scan: just the name (smaller plate, only for this app)</option></select></div>
         <div class="row two">
           <div><label>Style</label><select name="style">
             <option value="two_colour">Two-colour (best scanning)</option>
             <option value="hollow">Hollowed out (one colour)</option></select></div>
-          <div><label>Size (mm)</label><input name="size" type="number" min="40" max="150" step="5" value="60"></div>
+          <div><label>Size (mm)</label><input name="size" type="number" min="30" max="250" step="1" value=""></div>
           <div><label>Thickness (mm)</label><input name="thickness" type="number" min="2" max="10" step="0.5" value="5"></div>
         </div>
         <div><label>Text printed under the code (blank for none)</label><input name="label" maxlength="80"></div>
@@ -735,22 +735,19 @@ async function qrDialog(p) {
     hollow: "One colour: the dark squares are cut almost all the way through, so their shadows make the code. Scan in even light; a lighter filament works best.",
   };
   const refresh = guard(async () => {
-    if (form.elements.code.value !== code) {  // a full code needs a bigger plate
-      code = form.elements.code.value;
-      form.elements.size.value = code === "full" ? 90 : 60;
-    }
-    size = Number(form.elements.size.value) || 60;
+    if (form.elements.code.value !== code) { code = form.elements.code.value; form.elements.size.value = ""; }
+    size = Number(form.elements.size.value) || 0;  // 0 = the smallest plate with 1.5 mm squares
     style = form.elements.style.value;
     thickness = Number(form.elements.thickness.value) || 5;
-    const q = await api(`/api/profiles/${p.id}/qr?size=${size}&code=${code}`);
+    const q = await api(`/api/profiles/${p.id}/qr?size=${size || 30}&code=${code}`);
+    if (!form.elements.size.value) form.elements.size.placeholder = `${q.min_size_mm} (smallest)`;
     if (form.elements.label.dataset.init !== "1") { form.elements.label.value = q.label; form.elements.label.dataset.init = "1"; }
     $("#qr-img", form).innerHTML = q.svg;
-    const need = Math.ceil((1.3 * (q.modules + 6)) / 5) * 5;  // 1.3 mm squares scan reliably off a 0.4 mm nozzle
-    $("#qr-info", form).innerHTML = `${q.modules}×${q.modules} QR, <b>${q.module_mm} mm</b> per square
-      ${q.module_mm < 1.2 ? `<span style="color:var(--bad)">: too small for phones to read off a print. Make it ${need} mm${code === "full" ? ", or use Quick scan" : ""}.</span>`
-        : `<span style="color:var(--good)">: good size for scanning</span>`}`;
+    $("#qr-info", form).innerHTML = `${q.modules}×${q.modules} QR on a <b>${q.size_mm} mm</b> plate, <b>${q.module_mm} mm</b> per square.
+      ${size && size < q.min_size_mm ? `<span style="color:var(--warn)">Made bigger than ${size} mm so no square is under ${q.min_module_mm} mm.</span>`
+        : `<span class="muted">Squares are never under ${q.min_module_mm} mm, so phones can read them off a print.</span>`}`;
     $("#qr-style-tip", form).textContent = tips[style];
-    $("#qr-dl", form).href = `/api/profiles/${p.id}/swatch.3mf?style=${style}&size=${size}&thickness=${thickness}&code=${code}` +
+    $("#qr-dl", form).href = `/api/profiles/${p.id}/swatch.3mf?style=${style}&size=${q.size_mm}&thickness=${thickness}&code=${code}` +
       `&label=${encodeURIComponent(form.elements.label.value)}`;
     $("#qr-open", form).href = q.url;
   });

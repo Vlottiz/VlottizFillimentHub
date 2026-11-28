@@ -19,12 +19,14 @@ print the QR in a second colour:
 from __future__ import annotations
 
 import io
+import math
 import zipfile
 from urllib.parse import quote, unquote_plus
 
 from . import orca
 
 DEFAULT_BASE_URL = "https://vlottiz.github.io/VlottizFillimentHub/"
+MIN_MODULE_MM = 1.5  # smallest printed QR square: phones read these reliably off a 0.4 mm nozzle print
 QUIET = 3          # light border around the code, in modules (phones find it more easily)
 LABEL_PX = 0.25    # mm per pixel for the printed name
 TEXT_DEPTH = 1.0   # hollow style: how deep the name is cut (mm)
@@ -219,6 +221,12 @@ def label_mask(text: str, width_mm: float, max_lines: int = 2) -> list[list[bool
     return [[px[x, y] >= 110 for x in range(w_px)] for y in range(h_px)]
 
 
+def plate_size(modules: int, size_mm: float) -> float:
+    """The plate size to use: what was asked, or bigger so every square is at least MIN_MODULE_MM."""
+    need = math.ceil(MIN_MODULE_MM * (modules + 2 * QUIET))
+    return float(max(size_mm, need))
+
+
 def build_parts(matrix: list[list[bool]], size_mm: float = 60.0, thickness: float = 5.0,
                 style: str = "two_colour", label: str = "") -> tuple[list[tuple[str, _Mesh]], float]:
     """Return ([(part name, mesh)], module size in mm).
@@ -229,6 +237,7 @@ def build_parts(matrix: list[list[bool]], size_mm: float = 60.0, thickness: floa
     if style not in ("two_colour", "hollow"):
         raise ValueError("style must be two_colour or hollow")
     n = len(matrix)
+    size_mm = plate_size(n, size_mm)
     total = n + 2 * QUIET
     cell = size_mm / total
     dark = [[False] * total for _ in range(total)]

@@ -770,7 +770,7 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         return qr_settings()
 
     @app.get("/api/profiles/{pid}/qr")
-    def profile_qr(pid: int, size: float = 60, code: str = "short"):
+    def profile_qr(pid: int, size: float = 60, code: str = "full"):
         if code not in QR_CODES:
             raise HTTPException(400, "code must be short or full")
         url = qr_link(get_profile(pid), code)
@@ -779,19 +779,21 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         except ValueError:
             raise HTTPException(400, "Too much data for a QR code")
         n = len(matrix)
+        used = swatch.plate_size(n, size)
         return {"url": url, "chars": len(url), "modules": n, "svg": swatch.qr_svg(url),
                 "label": swatch.label_text(get_profile(pid)["name"]),
-                "module_mm": round(size / (n + 2 * swatch.QUIET), 2)}
+                "size_mm": used, "min_size_mm": swatch.plate_size(n, 0), "min_module_mm": swatch.MIN_MODULE_MM,
+                "module_mm": round(used / (n + 2 * swatch.QUIET), 2)}
 
     @app.get("/api/profiles/{pid}/swatch.3mf")
     def profile_swatch(pid: int, style: str = "two_colour", size: float = 60, thickness: float = 5,
-                       label: str | None = None, code: str = "short"):
+                       label: str | None = None, code: str = "full"):
         if code not in QR_CODES:
             raise HTTPException(400, "code must be short or full")
         if style not in ("two_colour", "hollow"):
             raise HTTPException(400, "style must be two_colour or hollow")
-        if not (30 <= size <= 150 and 2 <= thickness <= 15):
-            raise HTTPException(400, "Size must be 30-150 mm and thickness 2-15 mm")
+        if not (30 <= size <= 250 and 2 <= thickness <= 15):
+            raise HTTPException(400, "Size must be 30-250 mm and thickness 2-15 mm")
         p = get_profile(pid)
         text = swatch.label_text(p["name"]) if label is None else label[:80]
         parts, _cell = swatch.build_parts(swatch.qr_matrix(qr_link(p, code)), size, thickness, style, text)
