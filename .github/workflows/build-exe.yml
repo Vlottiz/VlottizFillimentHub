@@ -1,5 +1,6 @@
 # Builds FilamentForge.exe on Windows.
-# - Every push to main: the exe is attached to the workflow run (Actions tab → run → Artifacts).
+# - Every push to main (and every pull request): the exe is attached to the workflow run
+#   (Actions tab → run → Artifacts).
 # - Push a tag like v1.2.0: also publishes a GitHub Release with the exe to download.
 name: Build Windows exe
 
@@ -7,6 +8,7 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
