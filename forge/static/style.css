@@ -168,3 +168,6 @@ input.ai-unverified, select.ai-unverified { box-shadow: 0 0 0 2px var(--warn); }
 .opt { display: flex; gap: 8px; align-items: flex-start; color: var(--text); font-size: 14px; margin: 4px 0; }
 .opt input { margin-top: 3px; }
 .issue-pick { max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin-top: 8px; }
+
+.scan-wrap video { width: 100%; max-height: 360px; background: #000; border-radius: 8px; display: block; }
+.scan-wrap video:not([src]):not([srcObject]) { min-height: 0; }

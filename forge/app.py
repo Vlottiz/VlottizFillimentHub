@@ -995,6 +995,22 @@ def create_app(db_path: str | Path | None = None, manage_ai: bool = True) -> Fas
         r = _import_preset(preset, None)
         return {**profile_detail(r["profile_id"]), "import": r}
 
+    @app.post("/api/scan-swatch")
+    def scan_swatch(file: UploadFile = File(...), import_now: bool = Form(True)):
+        """Read the QR code on a swatch from a photo or webcam frame, and import it."""
+        data = file.file.read(MAX_UPLOAD + 1)
+        if len(data) > MAX_UPLOAD:
+            raise HTTPException(400, "That image is over 20 MB")
+        try:
+            link = swatch.read_qr(data)
+        except RuntimeError as e:
+            raise HTTPException(500, str(e))
+        if not link:
+            raise HTTPException(422, "No Filament Forge QR code found. Hold the swatch flat, closer, in good light.")
+        if not import_now:
+            return {"link": link}
+        return {**import_swatch_link(SwatchLinkIn(link=link)), "link": link}
+
     # ------------------------------------------------- your group in Orca
     class GroupIn(BaseModel):
         name: str

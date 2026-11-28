@@ -271,3 +271,32 @@ def to_3mf(parts: list[tuple[str, _Mesh]], title: str) -> bytes:
         z.writestr("_rels/.rels", rels)
         z.writestr("3D/3dmodel.model", model)
     return buf.getvalue()
+
+
+# ------------------------------------------------------------- reading
+def read_qr(image_bytes: bytes) -> str | None:
+    """Find a Filament Forge swatch link in a photo (or webcam frame).
+
+    Tries the photo as-is, then with boosted contrast, then inverted (the
+    hollow style can read light-on-dark in some lighting), at a couple of sizes.
+    """
+    try:
+        import zxingcpp
+        from PIL import Image, ImageOps
+    except ImportError:
+        raise RuntimeError("QR reading needs the 'zxing-cpp' package (pip install zxing-cpp)")
+    try:
+        img = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("L")
+    except Exception:
+        return None
+    candidates = []
+    for scale in (1.0, 0.5):
+        im = img if scale == 1.0 else img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))))
+        auto = ImageOps.autocontrast(im, cutoff=2)
+        candidates += [im, auto, ImageOps.invert(auto)]
+    for cand in candidates:
+        for r in zxingcpp.read_barcodes(cand):
+            text = (r.text or "").strip()
+            if "#1*" in text or text.startswith("1*"):
+                return text
+    return None
