@@ -30,6 +30,12 @@ python -m venv .venv
 .venv/bin/python run.py
 ```
 
+## Updating
+
+1. Get the new version: **Code → Download ZIP** on GitHub and unzip it over your old copy (or `git pull` if you cloned it).
+2. **Keep your `data` folder.** It holds your filaments, profiles, history, photos and the downloaded AI.
+3. Run `start.bat` / `start.sh` as usual. It installs any new packages automatically when they've changed.
+
 ## Typical workflow
 
 1. **Printers:** a Snapmaker U1 is already set up using the speeds and sizes from Orca's own U1 profile. Click **Import printer.cfg** and pick your config files (download them from the printer's Fluidd/Mainsail config page). That fills in temperature limits and nozzle size.
