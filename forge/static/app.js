@@ -292,16 +292,67 @@ async function importPresets(fileList) {
 }
 
 $("#import-json").onclick = () => $("#import-json-file").click();
-$("#import-link").onclick = () => openDialog(`<h2>Import from a QR swatch</h2>
-  <p class="small muted">Scan the swatch with your phone's camera, copy the link it shows (long-press → Copy), send it to this
-    computer (e.g. email it to yourself) and paste it here. This works even if the scan page isn't online.</p>
-  <textarea name="link" rows="4" required placeholder="https://vlottiz.github.io/VlottizFillimentHub/#1*..."></textarea>
-  <div class="actions"><button class="primary" value="go">Import</button><button value="cancel" formnovalidate>Cancel</button></div>`,
-  async (fd) => {
-    const p = await api("/api/import-swatch-link", { json: { link: fd.get("link") } });
-    toast(`Imported ${p.name}: ${p.import.new_profile ? (p.import.new_filament ? "new filament + profile" : "new profile") : "updated"}`);
-    state.current = p.id; show("profiles");
+async function importSwatchLink(link) {
+  const p = await api("/api/import-swatch-link", { json: { link } });
+  toast(`Imported ${p.name}: ${p.import.new_profile ? (p.import.new_filament ? "new filament + profile" : "new profile") : "updated"}`);
+  state.current = p.id; show("profiles");
+  return p;
+}
+
+$("#import-link").onclick = () => {
+  let stream = null, timer = null, busy = false;
+  const stop = () => { clearInterval(timer); timer = null; stream?.getTracks().forEach((t) => t.stop()); stream = null; };
+  const form = openDialog(`<h2>Scan a QR swatch</h2>
+    <p class="small muted">Hold the swatch up to your webcam, upload a photo of it, or paste the link your phone shows when it scans one.</p>
+    <div class="scan-wrap"><video id="scan-video" playsinline muted></video><canvas id="scan-canvas" hidden></canvas></div>
+    <div class="actions"><button type="button" class="primary" id="scan-cam">Use webcam</button>
+      <label class="btn">Upload a photo<input type="file" id="scan-photo" accept="image/*" hidden></label></div>
+    <p id="scan-msg" class="small"></p>
+    <details style="margin-top:8px"><summary class="small">Paste a swatch link instead</summary>
+      <textarea id="scan-link" rows="3" placeholder="https://vlottiz.github.io/VlottizFillimentHub/#1*..."></textarea>
+      <div class="actions"><button type="button" id="scan-link-go">Import link</button></div></details>
+    <div class="actions"><button value="cancel" formnovalidate>Close</button></div>`, () => {});
+  const msg = (t, bad) => { const m = $("#scan-msg", form); m.textContent = t; m.style.color = bad ? "var(--bad)" : ""; };
+  const done = async (link) => { stop(); $("#dlg").close(); await importSwatchLink(link); };
+  $("#dlg").addEventListener("close", stop, { once: true });
+
+  const send = async (blob, importNow) => {
+    const fd = new FormData();
+    fd.append("file", blob, "swatch.jpg");
+    fd.append("import_now", importNow ? "true" : "false");
+    return api("/api/scan-swatch", { method: "POST", body: fd });
+  };
+  $("#scan-cam", form).onclick = guard(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) { msg("This browser can't use the webcam here; upload a photo instead.", true); return; }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    } catch (e) { msg("Couldn't open the webcam (" + e.message + "). Upload a photo instead.", true); return; }
+    const video = $("#scan-video", form), canvas = $("#scan-canvas", form);
+    video.srcObject = stream; await video.play();
+    msg("Looking for the QR code… hold the swatch flat, filling about half the picture.");
+    timer = setInterval(async () => {
+      if (busy || !video.videoWidth) return;
+      busy = true;
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
+      try { const r = await send(blob, false); await done(r.link); }
+      catch { /* not found yet, keep looking */ }
+      finally { busy = false; }
+    }, 700);
   });
+  $("#scan-photo", form).onchange = guard(async (ev) => {
+    const f = ev.target.files[0]; if (!f) return;
+    msg("Reading the photo…");
+    try { const r = await send(f, false); await done(r.link); }
+    catch (e) { msg(e.message, true); }
+  });
+  $("#scan-link-go", form).onclick = guard(async () => {
+    const link = $("#scan-link", form).value.trim();
+    if (!link) { msg("Paste the link first.", true); return; }
+    await done(link);
+  });
+};
 $("#import-json-file").onchange = guard(async (ev) => { await importPresets(ev.target.files); ev.target.value = ""; });
 
 // Drag .json files anywhere onto the app to import them.
@@ -1247,7 +1298,13 @@ async function renderAI() {
     await loadPrinters();
     let view = "filaments";
     try { view = localStorage.getItem("ff-view") || view; } catch {}
-    show(view);
+    const swatchLink = location.hash.startsWith("#swatch=") ? decodeURIComponent(location.hash.slice(8)) : "";
+    if (swatchLink) {
+      history.replaceState(null, "", location.pathname);  // don't import twice on reload
+      try { await importSwatchLink(swatchLink); } catch (e) { toast("Couldn't import the swatch: " + e.message, true); show(view); }
+    } else {
+      show(view);
+    }
     pollAI();
   } catch (e) { toast("Couldn't reach the app server: " + e.message, true); }
 })();

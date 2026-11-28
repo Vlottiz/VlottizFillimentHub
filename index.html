@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- If GitHub Pages is set to serve the repo root (instead of /docs), this sends
+     swatch links on to the real scan page in docs/, keeping the profile data after '#'. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Filament Swatch</title>
+<script>location.replace("docs/index.html" + location.hash);</script>
+</head>
+<body style="font-family:system-ui,sans-serif;padding:20px">
+  <p>Opening the swatch page… <a id="go" href="docs/index.html">Tap here if nothing happens.</a></p>
+  <script>document.getElementById("go").href = "docs/index.html" + location.hash;</script>
+</body>
+</html>

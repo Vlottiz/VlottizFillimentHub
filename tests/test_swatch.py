@@ -204,3 +204,61 @@ def test_import_from_swatch_link(client):
         assert p["settings"][k] == before["settings"][k]
     assert p["sources"]["pressure_advance"] == "calibrated" and p["sources"]["fan_max_speed"] == "tested"
     assert client.post("/api/import-swatch-link", json={"link": "https://example.com/#nope"}).status_code == 400
+
+
+def _photo_of_swatch(parts, plate_colour=(198, 198, 200), qr_colour=(70, 70, 75), scale=8, blur=1.2, angle=7):
+    """Rough 'phone photo' of the printed swatch: top faces only, then blurred, rotated, JPEG'd."""
+    from PIL import Image, ImageDraw, ImageFilter
+    H = max(v[1] for _, m in parts for v in m.verts)
+    W = max(v[0] for _, m in parts for v in m.verts)
+    img = Image.new("RGB", (int(W * scale) + 80, int(H * scale) + 80), (40, 30, 30))   # dark desk around it
+    d = ImageDraw.Draw(img)
+    top = max(v[2] for _, m in parts for v in m.verts)
+    for name, mesh in parts:
+        col = qr_colour if "second colour" in name else plate_colour
+        for a, b, c in mesh.tris:
+            p = [mesh.verts[i] for i in (a, b, c)]
+            if all(abs(q[2] - top) < 1e-6 for q in p):
+                d.polygon([(40 + q[0] * scale, 40 + (H - q[1]) * scale) for q in p], fill=col)
+    img = img.filter(ImageFilter.GaussianBlur(blur)).rotate(angle, expand=True, fillcolor=(40, 30, 30))
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=70)
+    return out.getvalue()
+
+
+@pytest.mark.parametrize("angle,blur", [(0, 0.5), (7, 1.2), (-12, 1.5)])
+def test_read_qr_from_a_photo_of_the_printed_swatch(client, angle, blur):
+    pid = _calibrated_profile(client)
+    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    parts, _ = swatch.build_parts(swatch.qr_matrix(url), 60, 5, "two_colour", "Giantarm PLA Silk Silver")
+    photo = _photo_of_swatch(parts, angle=angle, blur=blur)
+    assert swatch.read_qr(photo) == url
+
+
+def test_scan_swatch_endpoint_imports_it(client):
+    pid = _calibrated_profile(client)
+    url = client.get(f"/api/profiles/{pid}/qr").json()["url"]
+    before = client.get(f"/api/profiles/{pid}").json()
+    client.delete(f"/api/profiles/{pid}")
+    parts, _ = swatch.build_parts(swatch.qr_matrix(url), 60, 5, "two_colour", "Giantarm")
+    r = client.post("/api/scan-swatch", files={"file": ("swatch.jpg", _photo_of_swatch(parts), "image/jpeg")})
+    assert r.status_code == 200, r.text
+    p = r.json()
+    assert p["name"] == before["name"] and p["link"] == url
+    assert p["settings"]["pressure_advance"] == before["settings"]["pressure_advance"]
+    assert p["sources"]["pressure_advance"] == "calibrated"
+    # just read it without importing (webcam preview)
+    r = client.post("/api/scan-swatch", data={"import_now": "false"},
+                    files={"file": ("s.jpg", _photo_of_swatch(parts), "image/jpeg")})
+    assert r.json() == {"link": url}
+    # a photo with no code in it
+    from PIL import Image
+    blank = io.BytesIO(); Image.new("RGB", (400, 300), (120, 120, 120)).save(blank, "JPEG")
+    assert client.post("/api/scan-swatch", files={"file": ("x.jpg", blank.getvalue(), "image/jpeg")}).status_code == 422
+    assert client.post("/api/scan-swatch", files={"file": ("x.jpg", b"junk", "image/jpeg")}).status_code == 422
+
+
+def test_root_redirect_page_keeps_the_swatch_data():
+    root = DOCS.parent / "index.html"
+    html = root.read_text()
+    assert "docs/" in html and "location.hash" in html

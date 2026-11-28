@@ -100,9 +100,14 @@ On a profile, click **Print QR swatch** to download a `.3mf` plate (60 × 60 × 
 
 The filament's name is printed under the code (you can change the text in the dialog, or leave it blank).
 
+**Getting a swatch into the app:**
+- **Scan swatch** (Filaments page): hold the swatch up to your PC's webcam, or upload a photo of it. The app reads the code and imports the profile.
+- On the scan page (phone or PC): **Add to Filament Forge on this computer** opens the app and imports it, if the app is running on that computer. On a phone, **Save or send** the .json or bundle instead.
+- Or paste the link your phone shows into **Scan swatch → Paste a swatch link**.
+
 **Scanning shows nothing?** Check that the QR part was printed in a *different, darker* filament than the plate (same filament = invisible code), that GitHub Pages is turned on (below), and try scanning in good light from about 15–20 cm. Without the scan page, you can still get the profile: copy the link your phone shows, and in the app use **Filaments → Paste swatch link**.
 
-**One-time setup:** the scan page is `docs/index.html` in this repo. Turn on GitHub Pages: repo **Settings → Pages → Deploy from a branch → main → /docs → Save**. The page address (default `https://vlottiz.github.io/VlottizFillimentHub/`) can be changed in the QR dialog.
+**One-time setup:** the scan page is `docs/index.html` in this repo. Turn on GitHub Pages: repo **Settings → Pages → Deploy from a branch → main → /docs → Save**. (If it's set to `/ (root)` instead, a small redirect page sends swatch links on to `docs/`, so either works.) The page address (default `https://vlottiz.github.io/VlottizFillimentHub/`) can be changed in the QR dialog.
 
 ## Reaching 100%
 

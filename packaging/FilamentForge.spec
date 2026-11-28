@@ -11,7 +11,7 @@ ROOT = Path(SPECPATH).parent  # noqa: F821 (SPECPATH is set by PyInstaller)
 hidden = (
     collect_submodules("uvicorn")
     + collect_submodules("forge")
-    + ["python_multipart", "multipart", "segno", "pypdf", "PIL.ImageFont"]
+    + ["python_multipart", "multipart", "segno", "pypdf", "PIL.ImageFont", "zxingcpp"]
 )
 
 a = Analysis(  # noqa: F821
